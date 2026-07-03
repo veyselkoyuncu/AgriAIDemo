@@ -7,6 +7,17 @@ export async function sendWhatsAppMessage(to: string, text: string): Promise<boo
     return false;
   }
 
+  // 1. Sanitization: remove all non-digits
+  const cleanRecipientPhone = to.replace(/\D/g, "");
+
+  // 2. Debug logs to Vercel/Next.js console
+  console.log(`[DEBUG] sendWhatsAppMessage - Original to: "${to}", Typeof to: "${typeof to}"`);
+  console.log(`[DEBUG] sendWhatsAppMessage - Cleaned to: "${cleanRecipientPhone}", Typeof Cleaned to: "${typeof cleanRecipientPhone}"`);
+
+  // 3. Hardcoded recipient to isolate sandbox allowed list issues
+  const finalRecipient = "905522617090";
+  console.log(`[DEBUG] sendWhatsAppMessage - Using hardcoded recipient for isolation: "${finalRecipient}"`);
+
   const url = `https://graph.facebook.com/v25.0/${phoneNumberId}/messages`;
 
   try {
@@ -19,7 +30,7 @@ export async function sendWhatsAppMessage(to: string, text: string): Promise<boo
       body: JSON.stringify({
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to,
+        to: finalRecipient,
         type: "text",
         text: {
           preview_url: false,
