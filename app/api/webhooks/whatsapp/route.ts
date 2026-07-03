@@ -26,6 +26,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
+    // Log the full webhook body for easy debugging in Vercel console
+    console.log("[DEBUG] WhatsApp Webhook POST raw body:", JSON.stringify(body, null, 2));
+
     // Verify it is a WhatsApp business payload
     if (body.object !== "whatsapp_business_account") {
       return NextResponse.json({ error: "Invalid webhook object" }, { status: 400 });
@@ -41,7 +44,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: "ignored" });
     }
 
-    const from = message.from; // Sender's phone number
+    // Target the sender's phone number directly from the message payload (messages[0].from)
+    const from = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
+    console.log(`[DEBUG] WhatsApp Webhook - Extracted from: "${from}", Typeof: "${typeof from}"`);
     const messageId = message.id;
     const messageType = message.type;
 
