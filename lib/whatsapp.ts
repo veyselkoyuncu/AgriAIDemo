@@ -7,7 +7,7 @@ export async function sendWhatsAppMessage(to: string, text: string): Promise<boo
     return false;
   }
 
-  const url = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
+  const url = `https://graph.facebook.com/v25.0/${phoneNumberId}/messages`;
 
   try {
     const response = await fetch(url, {
@@ -52,7 +52,7 @@ export async function downloadWhatsAppMedia(mediaId: string): Promise<{ base64: 
 
   try {
     // 1. Get media URL
-    const metaUrl = `https://graph.facebook.com/v21.0/${mediaId}`;
+    const metaUrl = `https://graph.facebook.com/v25.0/${mediaId}`;
     const metaResponse = await fetch(metaUrl, {
       headers: {
         Authorization: `Bearer ${token}`,
