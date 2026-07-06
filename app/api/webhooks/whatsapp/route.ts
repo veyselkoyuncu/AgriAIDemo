@@ -84,6 +84,7 @@ export async function POST(request: NextRequest) {
     const { data: farmerStatus, error: statusError } = await supabase.rpc("get_farmer_status", {
       p_phone: from,
     });
+    console.log("farmerStatus =>", JSON.stringify(farmerStatus, null, 2));
 
     if (statusError) {
       console.error("Supabase error fetching farmer status:", statusError);
@@ -94,7 +95,7 @@ export async function POST(request: NextRequest) {
     if (!isRegistered) {
       // User is not registered in the system
       const reply = `Merhaba! Tarım Günlüğü sisteminde bu telefon numarasıyla (${from}) kayıtlı bir çiftçi profili bulamadık. Lütfen sisteme kayıt olmak için web sitemizi ziyaret edin ve bu telefon numarasını profilinize kaydedin.`;
-      
+
       // Log the message raw
       await supabase.from("messages").insert({
         phone: from,
