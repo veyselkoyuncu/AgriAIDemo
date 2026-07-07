@@ -49,7 +49,20 @@ export async function POST(request: NextRequest) {
     console.log(`[DEBUG] WhatsApp Webhook - Extracted from: "${from}", Typeof: "${typeof from}"`);
     const messageId = message.id;
     const messageType = message.type;
+    // Duplicate webhook protection
+    const { data: existingMessage } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("message_id", messageId)
+      .maybeSingle();
 
+    if (existingMessage) {
+      console.log(`[INFO] Duplicate webhook ignored: ${messageId}`);
+
+      return NextResponse.json({
+        status: "duplicate_ignored",
+      });
+    }
     let rawMessageText = "";
     let audioData: { base64: string; mimeType: string } | undefined = undefined;
 
@@ -133,6 +146,7 @@ export async function POST(request: NextRequest) {
 
     // 5. Save the Message Log to DB
     const { error: msgInsertError } = await supabase.from("messages").insert({
+      message_id: messageId,
       phone: from,
       raw_message: savedMessageText,
       intent: aiResponse.intent,
