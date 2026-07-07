@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { analyzeMessage } from "@/lib/gemini";
+import { getConversation, createConversation, updateConversation, deleteConversation, isConversationExpired } from "@/lib/conversation/state";
+import { extractFromMessage } from "@/lib/gemini/extractor";
+import { generateResponse } from "@/lib/gemini/responder";
 import { sendWhatsAppMessage, downloadWhatsAppMedia } from "@/lib/whatsapp";
 
 // Meta Webhook Verification (GET)
@@ -26,7 +28,6 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    // Log the full webhook body for easy debugging in Vercel console
     console.log("[DEBUG] WhatsApp Webhook POST raw body:", JSON.stringify(body, null, 2));
 
     // Verify it is a WhatsApp business payload
@@ -39,17 +40,18 @@ export async function POST(request: NextRequest) {
     const value = changes?.value;
     const message = value?.messages?.[0];
 
-    // If there is no message payload, return 200 (could be statuses update)
+    // If there is no message payload, return 200 (could be status updates)
     if (!message) {
       return NextResponse.json({ status: "ignored" });
     }
 
-    // Target the sender's phone number directly from the message payload (messages[0].from)
-    const from = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
-    console.log(`[DEBUG] WhatsApp Webhook - Extracted from: "${from}", Typeof: "${typeof from}"`);
+    // Extract details
+    const from = message.from;
+    console.log(`[DEBUG] WhatsApp Webhook - Extracted from: "${from}"`);
     const messageId = message.id;
     const messageType = message.type;
-    // Duplicate webhook protection
+
+    // 1. Duplicate webhook protection
     const { data: existingMessage } = await supabase
       .from("messages")
       .select("id")
@@ -58,15 +60,13 @@ export async function POST(request: NextRequest) {
 
     if (existingMessage) {
       console.log(`[INFO] Duplicate webhook ignored: ${messageId}`);
-
-      return NextResponse.json({
-        status: "duplicate_ignored",
-      });
+      return NextResponse.json({ status: "duplicate_ignored" });
     }
+
     let rawMessageText = "";
     let audioData: { base64: string; mimeType: string } | undefined = undefined;
 
-    // 1. Process Message Content (Text vs Audio)
+    // 2. Process Message Content (Text vs Audio)
     if (messageType === "text") {
       rawMessageText = message.text?.body || "";
     } else if (messageType === "audio") {
@@ -78,13 +78,11 @@ export async function POST(request: NextRequest) {
         const downloaded = await downloadWhatsAppMedia(audioId);
         if (downloaded) {
           audioData = downloaded;
-          rawMessageText = ""; // The text content will be parsed directly from audio by Gemini
         } else {
           console.warn("Failed to download WhatsApp audio attachment");
         }
       }
     } else {
-      // Ignore other media types for now
       console.warn(`Unsupported message type: ${messageType}`);
       return NextResponse.json({ status: "unsupported_type" });
     }
@@ -93,7 +91,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No message text or audio file processed" }, { status: 400 });
     }
 
-    // 2. Fetch Farmer Profile Status
+    // 3. Fetch Farmer Profile Status
     const { data: farmerStatus, error: statusError } = await supabase.rpc("get_farmer_status", {
       p_phone: from,
     });
@@ -124,7 +122,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: "not_registered", phone: from });
     }
 
-    // 3. Fetch Farmer Activity History
+    // 4. Fetch Farmer Activity History
     const { data: historyData, error: historyError } = await supabase.rpc("get_farmer_history", {
       p_phone: from,
     });
@@ -135,52 +133,188 @@ export async function POST(request: NextRequest) {
 
     const history = historyData || [];
 
-    // 4. Send to Gemini 1.5 Flash for Structured Analysis
-    console.log(`Analyzing message from ${from}...`);
-    const aiResponse = await analyzeMessage(rawMessageText, farmerStatus, history, audioData);
-    console.log("Gemini parsed response:", aiResponse);
+    // 5. Fetch and Validate Conversation State
+    let conversation = await getConversation(from);
+    if (conversation && isConversationExpired(conversation, 15)) {
+      console.log(`[INFO] Conversation expired for ${from}. Deleting...`);
+      await deleteConversation(from);
+      conversation = null;
+    }
 
-    // If message was audio, we should save Gemini's summary or the transcription in messages if possible.
-    // For simplicity, we save rawMessageText. If it was empty, we can write an indicator.
+    // 6. Check for Explicit Cancellation Words
+    const isCancel = messageType === "text" &&
+      /^\s*(iptal|vazgeçtim|vazgec*tim|boşver|bosver|baştan başlayalım|bastan baslayalim)\s*$/i.test(rawMessageText);
+
+    let responderStatus: "idle" | "collecting" | "completed" | "cancelled" = "idle";
+    let responderIntent: "activity" | "question" | "unknown" = "unknown";
+    let responderPendingData: any = null;
+    let responderNextMissingField: string | null = null;
+
+    if (isCancel) {
+      console.log(`[INFO] Farmer ${from} requested cancellation.`);
+      if (conversation) {
+        await deleteConversation(from);
+      }
+      responderStatus = "cancelled";
+      responderIntent = "unknown";
+      responderPendingData = null;
+      responderNextMissingField = null;
+    } else {
+      // 7. Extract structured data from the latest message
+      console.log(`Extracting entities from message for ${from}...`);
+      const extractorResult = await extractFromMessage(rawMessageText, farmerStatus, history, audioData);
+      console.log("Extractor Result:", JSON.stringify(extractorResult, null, 2));
+
+      // 8. Merge and flow logic
+      const isCurrentlyCollecting = conversation && conversation.status === "collecting";
+
+      if (extractorResult.intent === "activity" || isCurrentlyCollecting) {
+        // Run Node.js Merge Logic
+        const baseActivity = conversation?.pending_data || {
+          activity_type: null,
+          farm: null,
+          crop: null,
+          product: null,
+          quantity: null,
+          date: null,
+          missing_fields: []
+        };
+
+        const mergedActivity = { ...baseActivity };
+
+        // Overwrite only if the extractor returned a new non-null value
+        const fields = ["activity_type", "farm", "crop", "product", "quantity", "date"] as const;
+        for (const field of fields) {
+          const val = extractorResult[field];
+          if (val !== undefined && val !== null && val !== "") {
+            mergedActivity[field] = val as any;
+          }
+        }
+
+        // Default the date field to today's date if missing
+        if (!mergedActivity.date) {
+          const trDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
+          const year = trDate.getFullYear();
+          const month = String(trDate.getMonth() + 1).padStart(2, '0');
+          const day = String(trDate.getDate()).padStart(2, '0');
+          mergedActivity.date = `${year}-${month}-${day}`;
+        }
+
+        // Calculate missing fields programmatically
+        const missingFields: string[] = [];
+        if (!mergedActivity.activity_type) {
+          missingFields.push("activity_type");
+        } else {
+          if (!mergedActivity.farm) missingFields.push("farm");
+          if (!mergedActivity.crop) missingFields.push("crop");
+          
+          if (mergedActivity.activity_type === "fertilization" || mergedActivity.activity_type === "spraying") {
+            if (!mergedActivity.product) missingFields.push("product");
+          }
+          if (!mergedActivity.quantity) missingFields.push("quantity");
+        }
+
+        const nextMissingField = missingFields.length > 0 ? missingFields[0] : null;
+        mergedActivity.missing_fields = missingFields;
+
+        if (missingFields.length === 0) {
+          // Activity is complete!
+          responderStatus = "completed";
+          responderIntent = "activity";
+          responderPendingData = mergedActivity;
+          responderNextMissingField = null;
+
+          // Save Activity via Supabase RPC
+          console.log(`[INFO] Activity complete. Logging activity for ${from}...`);
+          const { data: logResult, error: logError } = await supabase.rpc("log_farmer_activity", {
+            p_phone: from,
+            p_farm_name: mergedActivity.farm,
+            p_crop_name: mergedActivity.crop,
+            p_activity_data: {
+              activity_type: mergedActivity.activity_type,
+              product: mergedActivity.product,
+              quantity: mergedActivity.quantity,
+              farm_name: mergedActivity.farm,
+              crop_name: mergedActivity.crop,
+              date: mergedActivity.date
+            }
+          });
+
+          if (logError) {
+            console.error("Supabase error saving activity via RPC:", logError);
+          } else {
+            console.log("Successfully saved activity:", logResult);
+          }
+
+          // Delete conversation state
+          await deleteConversation(from);
+        } else {
+          // Incomplete. Save state and continue collecting
+          responderStatus = "collecting";
+          responderIntent = "activity";
+          responderPendingData = mergedActivity;
+          responderNextMissingField = nextMissingField;
+
+          if (conversation) {
+            await updateConversation(from, {
+              intent: "activity",
+              status: "collecting",
+              pending_data: mergedActivity
+            });
+          } else {
+            await createConversation(from, "activity", "collecting", mergedActivity);
+          }
+        }
+      } else if (extractorResult.intent === "question") {
+        // Question interruption - keep existing session alive if any
+        responderStatus = conversation ? (conversation.status as any) : "idle";
+        responderIntent = "question";
+        responderPendingData = conversation ? conversation.pending_data : null;
+        responderNextMissingField = conversation?.pending_data?.missing_fields?.[0] || null;
+      } else {
+        // Unknown interruption (greetings, emoji, acknowledgment) - keep existing session alive
+        responderStatus = conversation ? (conversation.status as any) : "idle";
+        responderIntent = "unknown";
+        responderPendingData = conversation ? conversation.pending_data : null;
+        responderNextMissingField = conversation?.pending_data?.missing_fields?.[0] || null;
+      }
+    }
+
+    // 9. Generate reply message
+    console.log(`Generating responder reply for ${from}...`);
+    const replyMessage = await generateResponse(
+      rawMessageText || "[Ses Mesajı]",
+      responderStatus,
+      responderIntent,
+      responderPendingData,
+      responderNextMissingField,
+      farmerStatus,
+      history
+    );
+    console.log(`Generated reply: "${replyMessage}"`);
+
+    // 10. Save message log to DB
     const savedMessageText = rawMessageText || "[Ses Mesajı: Gemini tarafından çözümlendi]";
-
-    // 5. Save the Message Log to DB
     const { error: msgInsertError } = await supabase.from("messages").insert({
       message_id: messageId,
       phone: from,
       raw_message: savedMessageText,
-      intent: aiResponse.intent,
-      extracted_data: aiResponse.data,
-      reply_message: aiResponse.reply_message,
+      intent: responderIntent,
+      extracted_data: responderPendingData,
+      reply_message: replyMessage,
     });
 
     if (msgInsertError) {
       console.error("Error inserting message log:", msgInsertError);
     }
 
-    // 6. If it's a valid activity and has no missing fields, record it!
-    if (aiResponse.intent === "activity" && aiResponse.missing_fields.length === 0) {
-      const { data: logResult, error: logError } = await supabase.rpc("log_farmer_activity", {
-        p_phone: from,
-        p_farm_name: aiResponse.data.farm_name,
-        p_crop_name: aiResponse.data.crop_name,
-        p_activity_data: aiResponse.data,
-      });
-
-      if (logError) {
-        console.error("Supabase error saving activity via RPC:", logError);
-      } else {
-        console.log("Successfully saved activity:", logResult);
-      }
-    }
-
-    // 7. Send the Reply Message back to the Farmer via WhatsApp
-    await sendWhatsAppMessage(from, aiResponse.reply_message);
+    // 11. Send response via WhatsApp
+    await sendWhatsAppMessage(from, replyMessage);
 
     return NextResponse.json({
       status: "success",
-      intent: aiResponse.intent,
-      reply: aiResponse.reply_message,
+      intent: responderIntent,
+      reply: replyMessage,
     });
 
   } catch (error: any) {
