@@ -37,7 +37,7 @@ export class DeepSeekProvider implements AIProvider {
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "deepseek-chat",
+        model: "deepseek-v4-flash",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: request.message || "Lütfen analiz et ve çıkarım yap." }
@@ -99,7 +99,7 @@ export class DeepSeekProvider implements AIProvider {
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "deepseek-chat",
+        model: "deepseek-v4-flash",
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: request.message || "Selam" }
