@@ -6,6 +6,19 @@ export interface ExtractorResponse {
   product: string | null;
   quantity: string | null;
   date: string | null;
+  /**
+   * Collection Mode only.
+   * true  → user is clearly starting a brand new activity (e.g. "Hayır, biberi suladım").
+   *         Node will delete the current session and start fresh.
+   * false → user's message is a normal answer or correction within the current session.
+   */
+  is_new_activity: boolean;
+}
+
+export interface ActiveSession {
+  activity_type: string;
+  next_missing_field: string;
+  pending_data: any;
 }
 
 export interface ExtractorRequest {
@@ -13,6 +26,11 @@ export interface ExtractorRequest {
   farmerStatus: any;
   history: any[];
   audioData?: { base64: string; mimeType: string };
+  /**
+   * Provided when status === "collecting".
+   * Switches the extractor into guided Collection Mode.
+   */
+  activeSession?: ActiveSession;
 }
 
 export interface ResponderRequest {

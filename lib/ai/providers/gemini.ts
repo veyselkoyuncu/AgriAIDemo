@@ -12,7 +12,8 @@ export class GeminiProvider implements AIProvider {
       request.message,
       request.farmerStatus,
       request.history,
-      request.audioData
+      request.audioData,
+      request.activeSession
     );
   }
 

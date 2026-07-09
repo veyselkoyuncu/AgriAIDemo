@@ -1,33 +1,127 @@
-export function getExtractorPrompt(farmerStatus: any, history: any[], todayStr: string): string {
-  return `Sen bir tarım veri çıkarma asistanısın. Çiftçinin gönderdiği son mesajı (yazılı metin veya sesli mesaj) analiz ederek sadece yapılandırılmış JSON verisi çıkarırsın.
-  
-Kesinlikle çiftçiye hitap eden samimi veya herhangi bir sohbet yanıtı üretme! Sadece JSON nesnesini dön.
+import { ActiveSession } from "./types";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXTRACTOR PROMPT
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function getExtractorPrompt(
+  farmerStatus: any,
+  history: any[],
+  todayStr: string,
+  activeSession?: ActiveSession
+): string {
+  const domainRules = `
+TARIM DOMAIN KURALLARI — DİKKATLE OKU:
+
+1. Zirai ilaç ve gübre isimleri sıklıkla sayı içerir. Aşağıdakiler geçerli tek bir ürün adıdır:
+   - "Bravo 250 SC", "Score 250 EC", "Nativo 75 WG", "Forum 500 SC",
+     "Karate 2.5 WG", "DAP 18-46", "20-20-0", "15-15-15"
+   KESİNLİKLE bu isimlerdeki sayıları "quantity" olarak ayırma.
+   Tüm isim, sayısıyla birlikte, tek bir "product" değeridir.
+   Örnek: "Bravo 250 SC attım" → product = "Bravo 250 SC", quantity = null
+
+2. Miktar (quantity) çiftçinin tam olarak söylediği ifadedir. Normalize etme, dönüştürme.
+   Geçerli örnekler: "150 litre", "8 teneke", "yarım kilo", "5 kasa",
+   "1 bidon", "3 torba", "250 cc", "2 çuval", "1 ton", "4 kova"
+   Kullanıcı "8 teneke yaptım" diyorsa → quantity = "8 teneke"
+
+3. Tarla ve ürün adlarını çiftçinin kayıtlı tarlalarıyla eşleştirmeye çalış.
+   Örneğin "dereye" → "Dere Tarlası". Eşleşme yoksa kullanıcının söylediği ismi aynen yaz.`;
+
+  // ── COLLECTION MODE ────────────────────────────────────────────────────────
+  if (activeSession) {
+    const { activity_type, next_missing_field, pending_data } = activeSession;
+
+    const fieldLabels: Record<string, string> = {
+      farm: "tarla adı",
+      crop: "ürün / ekim adı",
+      product: "kullanılan ilaç, gübre veya ürün adı",
+      quantity: "miktar",
+      date: "tarih",
+      activity_type: "faaliyet türü",
+    };
+    const fieldLabel = fieldLabels[next_missing_field] ?? next_missing_field;
+
+    return `Sen bir tarım veri çıkarma asistanısın. Şu an KOLEKSİYON MODUNDA çalışıyorsun.
+
+Devam eden bir konuşma kaydı var:
+- Faaliyet türü (kilitli, değiştirilemez): ${activity_type}
+- Şimdiye kadar toplanan veriler: ${JSON.stringify(pending_data, null, 2)}
+- Bot az önce şunu sordu: "${fieldLabel}" (next_missing_field = "${next_missing_field}")
+- Çiftçinin mevcut tarlaları ve ürünleri: ${JSON.stringify(farmerStatus, null, 2)}
+
+GÖREV: Kullanıcının son mesajını analiz et. İki olasılık var:
+
+A) Kullanıcı botu soru yanıtladı veya bir düzeltme yaptı (normal durum):
+   - "${next_missing_field}" alanının değerini çıkar.
+   - Diğer tüm alanları null bırak.
+   - is_new_activity = false döndür.
+
+B) Kullanıcı açıkça mevcut kaydı bırakıp YENİ bir aktivite başlattı:
+   Örnek: "Hayır, biberi suladım", "Bırak onu, domatesleri hasat ettim", "Aslında gübreleme yaptım"
+   Bu durumda is_new_activity = true döndür ve yeni aktivite bilgilerini ilgili alanlara doldur.
+   DİKKAT: "Hayır, Çayır tarlası" gibi ifadeler yeni aktivite DEĞİLDİR, mevcut alan düzeltmesidir.
+   DİKKAT: Selamlaşma, emoji, teşekkür, onay ("tamam", "👍") yeni aktivite DEĞİLDİR.
+
+${domainRules}
+
+JSON formatı (tüm alanları döndür, ilgisiz olanları null yap):
+{
+  "intent": "activity",
+  "activity_type": null,
+  "farm": null,
+  "crop": null,
+  "product": null,
+  "quantity": null,
+  "date": null,
+  "is_new_activity": false
+}`;
+  }
+
+  // ── NORMAL MODE ────────────────────────────────────────────────────────────
+  return `Sen bir tarım veri çıkarma asistanısın. Çiftçinin gönderdiği mesajı analiz ederek sadece yapılandırılmış JSON verisi çıkarırsın.
+
+Kesinlikle çiftçiye hitap eden veya sohbet içeren bir yanıt üretme. Sadece JSON nesnesini döndür.
 
 Çiftçinin mevcut kayıtlı tarlaları ve ürünleri:
 ${JSON.stringify(farmerStatus, null, 2)}
-Bu tarlaları ve ürünleri, mesajda geçen ifadelerle eşleştirmek için kullan. Örneğin mesajda "dere" veya "dereye" geçiyorsa ve çiftçinin tarlaları arasında "Dere Tarlası" varsa bunu "Dere Tarlası" olarak eşle. Eğer listede olmayan yeni bir tarla veya ürün adı söylüyorsa, o zaman aynen yazdığı ismi çıkar.
 
 Çiftçinin son faaliyet geçmişi:
 ${JSON.stringify(history, null, 2)}
 
-Çıkarılması gereken alanlar:
-1. 'intent': Çiftçinin niyetini belirle:
-   - 'activity': Çiftçi bir tarımsal faaliyeti (gübreleme, ilaçlama, sulama, hasat, ekim) bildirdiğinde veya daha önce sorulmuş bir soruya cevap verdiğinde (Örn: "Dere tarlası", "Domates", "Evet", "150 litre", "Üre").
-   - 'question': Tarımsal bir soru sorduğunda (Örn: "Domates yaprağı sarardı ne yapmalıyım?", "Hangi gübre iyi gelir?").
-   - 'unknown': Selamlaşma, teşekkür, emoji, anlaşılmayan sözler veya iptal/vazgeçme kelimeleri (Örn: "selam", "👍", "sağ ol", "iptal", "vazgeçtim", "boşver", "tamam").
-2. 'activity_type': Eğer intent 'activity' ise şu değerlerden birini ata, aksi takdirde null:
-   - 'fertilization': Gübreleme, gübre atma.
-   - 'spraying': İlaçlama, ilaç atma.
-   - 'irrigation': Sulama, su verme.
-   - 'harvesting': Hasat yapma, toplama, biçme.
-   - 'planting': Ekim, dikim, tohum saçma.
-3. 'farm': Uygulanan tarla ismi. Çiftçinin tarlalarıyla eşleştir. Bulamazsan yeni söylenen tarla ismini yaz. Yoksa veya belirtilmemişse null.
-4. 'crop': Uygulanan ürün ismi (Örn: Domates, Biber, Buğday). Çiftçinin ürünleriyle eşleştir. Bulamazsan yeni söylenen ürün ismini yaz. Yoksa veya belirtilmemişse null.
-5. 'product': Kullanılan ürün/ilaç/gübre markası veya adı (Örn: "Üre gübresi", "K-Obiol ilaç", "Domates tohumu"). Sulama veya hasat için ürün yoksa null.
-6. 'quantity': Miktar bilgisi (Örn: "20 kg", "150 litre", "5 çuval", "3 saat"). Yoksa null.
-7. 'date': Belirtilen tarih. Eğer kullanıcı "dün", "2 gün önce", "geçen Cuma" gibi bir tarih belirttiyse, bugünün tarihini (${todayStr}) baz alarak YYYY-MM-DD formatında hesapla. Belirtilmemişse null dön.
+${domainRules}
 
-JSON formatı kesinlikle şu şablonda olmalıdır:
+ÇIKARILACAK ALANLAR:
+
+1. "intent": Çiftçinin niyeti:
+   - "activity": Bir tarımsal faaliyeti bildiriyor veya devam eden bir soruya cevap veriyor.
+     (Örn: "Bugün ilaç attım", "Dere tarlası", "150 litre", "Bravo 250 SC")
+   - "question": Tarımsal bir soru soruyor.
+     (Örn: "Domatese ne kadar gübre atmalıyım?", "Yapraklar sarardı ne yapayım?")
+   - "unknown": Selamlaşma, teşekkür, emoji, anlaşılmaz ifade, onay kelimesi.
+     (Örn: "selam", "👍", "tamam", "sağ ol", "iptal", "vazgeçtim")
+
+2. "activity_type": Intent "activity" ise şunlardan biri, değilse null:
+   - "fertilization" → Gübreleme
+   - "spraying"      → İlaçlama
+   - "irrigation"    → Sulama
+   - "harvesting"    → Hasat
+   - "planting"      → Ekim / Dikim
+
+3. "farm": Tarla adı. Kayıtlı tarlalarla eşleştir. Yoksa null.
+
+4. "crop": Ürün adı (Domates, Biber, Buğday…). Kayıtlılarla eşleştir. Yoksa null.
+
+5. "product": Kullanılan ilaç / gübre / tohum adı. Tam adı yaz (sayılar dahil). Yoksa null.
+
+6. "quantity": Çiftçinin söylediği miktar ifadesi aynen. Normalize etme. Yoksa null.
+
+7. "date": Belirtilen tarih, YYYY-MM-DD formatında. Göreceli ("dün", "2 gün önce") ise
+   bugünün tarihini (${todayStr}) baz alarak hesapla. Belirtilmemişse null.
+
+8. "is_new_activity": Normal modda her zaman false.
+
+JSON formatı:
 {
   "intent": "activity" | "question" | "unknown",
   "activity_type": string | null,
@@ -35,9 +129,14 @@ JSON formatı kesinlikle şu şablonda olmalıdır:
   "crop": string | null,
   "product": string | null,
   "quantity": string | null,
-  "date": string | null
+  "date": string | null,
+  "is_new_activity": false
 }`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESPONDER PROMPT (unchanged)
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function getResponderPrompt(
   status: string,
@@ -64,19 +163,22 @@ ${JSON.stringify(history, null, 2)}
 
 Lütfen yanıt üretirken kesinlikle aşağıdaki kurallara göre hareket et:
 1. Konuşma Durumu (status) 'completed' ise:
-   - Faaliyet kaydı başarıyla tamamlandı demektir. Çiftçiye girdiğin 'pendingData' detaylarını da içeren (hangi tarla, ürün, miktar, ilaç/gübre adı vb.), sıcak ve samimi bir onay mesajı yaz (Örn: "Hasan Bey, Dere tarlasındaki domatesler için 20 kg Üre Gübresi kaydını başarıyla aldım. Bereketli olsun!").
+   - Faaliyet kaydı başarıyla tamamlandı. 'pendingData' detaylarını içeren sıcak bir onay mesajı yaz.
+     (Örn: "Hasan Bey, Dere tarlasındaki domatesler için 20 kg Üre Gübresi kaydını aldım. Bereketli olsun!")
 2. Konuşma Durumu (status) 'collecting' ise:
-   - Çiftçiden eksik bilgileri topluyoruz. 'nextMissingField' parametresine bak ve çiftçiden bu alanı sormak üzere samimi bir Türkçe soru üret:
-     - 'farm' ise: Hangi tarlaya uyguladığımızı sor (Örn: "Hangi tarlaya uyguladınız?").
-     - 'crop' ise: Hangi ürüne uyguladığımızı sor (Örn: "Hangi ürüne/ekime yaptık?").
-     - 'product' ise: Hangi ürünü/ilacı/gübreyi kullandığımızı sor (Örn: "Hangi ilacı/gübreyi kullandınız?").
-     - 'quantity' ise: Miktarı sor (Örn: "Miktar ne kadardı?").
-     - 'date' ise: Tarihi sor.
-   - ÖNEMLİ GEÇİŞ KURALI: Eğer çiftçinin son mesajı ('message') bir soru (intent == 'question') ya da selam/acknowledgement (intent == 'unknown') ise, öncelikle çiftçinin bu mesajına kısa ve net bir yanıt ver/selamla, ardından cümleyi "Bu arada, gübrelemeyi hangi tarladaki domates için yaptık?" gibi yumuşak bir geçişle eksik alanı sorarak bitir.
+   - 'nextMissingField' parametresine bak ve çiftçiden o alanı sormak üzere samimi bir Türkçe soru üret:
+     - 'farm'          → Hangi tarlaya uyguladınız?
+     - 'crop'          → Hangi ürüne / ekime yaptık?
+     - 'product'       → Hangi ilacı / gübreyi kullandınız?
+     - 'quantity'      → Miktar ne kadardı?
+     - 'date'          → Hangi tarihte yaptınız?
+     - 'activity_type' → Ne tür bir faaliyet yaptınız? (Sulama mı, ilaçlama mı, gübreleme mi?)
+   - Eğer son mesaj bir soru veya selamlaşma içeriyorsa önce buna kısaca yanıt ver,
+     ardından yumuşak bir geçişle eksik alanı sor.
 3. Konuşma Durumu (status) 'cancelled' ise:
-   - Kayıt işleminin iptal edildiğini doğrulayan kısa ve dostça bir yanıt yaz (Örn: "Tamamdır Ahmet Bey, kaydı iptal ettim. Başka yapmamı istediğiniz bir şey var mı?").
-4. Son Belirlenen Niyet (intent) 'question' ise:
-   - Çiftçi genel bir tarım sorusu sordu demektir. Çiftçinin tarımsal geçmişine ve profiline bakarak, tavsiyelerde bulunup sorusunu detaylı ve dostça cevapla.
-5. Son Belirlenen Niyet (intent) 'unknown' ise:
-   - Selamlaşma, teşekkür, emoji veya diğer durumlar. Çiftçinin mesajına samimi bir yanıt ver, nasıl yardımcı olabileceğini sor (Örn: "Merhaba Ahmet Bey! Nasıl yardımcı olabilirim?", "Rica ederim, her zaman buradayım.").`;
+   - Kaydın iptal edildiğini doğrulayan kısa ve dostça bir yanıt yaz.
+4. Intent 'question' ise:
+   - Tarımsal soruyu, geçmişe ve profile bakarak, detaylı ve dostça cevapla.
+5. Intent 'unknown' ise:
+   - Çiftçinin mesajına samimi yanıt ver ve nasıl yardımcı olabileceğini sor.`;
 }

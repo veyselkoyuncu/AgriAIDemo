@@ -17,7 +17,8 @@ export class DeepSeekProvider implements AIProvider {
         crop: null,
         product: null,
         quantity: null,
-        date: null
+        date: null,
+        is_new_activity: false,
       };
     }
 
@@ -27,7 +28,7 @@ export class DeepSeekProvider implements AIProvider {
     }
 
     const todayStr = new Date().toLocaleDateString("tr-TR");
-    const systemPrompt = getExtractorPrompt(request.farmerStatus, request.history, todayStr);
+    const systemPrompt = getExtractorPrompt(request.farmerStatus, request.history, todayStr, request.activeSession);
 
     const response = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
@@ -70,7 +71,8 @@ export class DeepSeekProvider implements AIProvider {
         crop: null,
         product: null,
         quantity: null,
-        date: null
+        date: null,
+        is_new_activity: false,
       };
     }
   }

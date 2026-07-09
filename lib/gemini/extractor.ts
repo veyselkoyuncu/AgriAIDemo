@@ -1,4 +1,4 @@
-import { ExtractorResponse } from "@/lib/ai/types";
+import { ExtractorResponse, ActiveSession } from "@/lib/ai/types";
 import { getExtractorPrompt } from "@/lib/ai/prompts";
 
 export type { ExtractorResponse };
@@ -7,7 +7,8 @@ export async function extractFromMessage(
   message: string,
   farmerStatus: any,
   history: any[],
-  audioData?: { base64: string; mimeType: string }
+  audioData?: { base64: string; mimeType: string },
+  activeSession?: ActiveSession
 ): Promise<ExtractorResponse> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -15,7 +16,7 @@ export async function extractFromMessage(
   }
 
   const todayStr = new Date().toLocaleDateString("tr-TR");
-  const systemPrompt = getExtractorPrompt(farmerStatus, history, todayStr);
+  const systemPrompt = getExtractorPrompt(farmerStatus, history, todayStr, activeSession);
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
   const parts: any[] = [];
@@ -79,6 +80,7 @@ export async function extractFromMessage(
       product: null,
       quantity: null,
       date: null,
+      is_new_activity: false,
     };
   }
 }

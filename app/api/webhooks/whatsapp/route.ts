@@ -162,16 +162,38 @@ export async function POST(request: NextRequest) {
       // 7. Extract structured data from the latest message
       console.log(`Extracting entities from message for ${from}...`);
       const ai = getAIProvider();
+
+      let activeSession = undefined;
+      if (conversation && conversation.status === "collecting") {
+        const activity_type = conversation.pending_data?.activity_type;
+        const next_missing_field = conversation.pending_data?.missing_fields?.[0];
+        if (activity_type && next_missing_field) {
+          activeSession = {
+            activity_type,
+            next_missing_field,
+            pending_data: conversation.pending_data
+          };
+        }
+      }
+
       const extractorResult = await ai.extract({
         message: rawMessageText,
         farmerStatus,
         history,
-        audioData
+        audioData,
+        activeSession
       });
       console.log("Extractor Result:", JSON.stringify(extractorResult, null, 2));
 
       // 8. Merge and flow logic
-      const isCurrentlyCollecting = conversation && conversation.status === "collecting";
+      let isCurrentlyCollecting = conversation && conversation.status === "collecting";
+
+      if (isCurrentlyCollecting && extractorResult.is_new_activity) {
+        console.log(`[INFO] New activity detected during active session for ${from}. Resetting session...`);
+        await deleteConversation(from);
+        conversation = null;
+        isCurrentlyCollecting = false;
+      }
 
       if (extractorResult.intent === "activity" || isCurrentlyCollecting) {
         // Run Node.js Merge Logic
@@ -190,6 +212,10 @@ export async function POST(request: NextRequest) {
         // Overwrite only if the extractor returned a new non-null value
         const fields = ["activity_type", "farm", "crop", "product", "quantity", "date"] as const;
         for (const field of fields) {
+          // Lock activity_type if we are currently collecting
+          if (field === "activity_type" && isCurrentlyCollecting && baseActivity.activity_type) {
+            continue;
+          }
           const val = extractorResult[field];
           if (val !== undefined && val !== null && val !== "") {
             mergedActivity[field] = val as any;
