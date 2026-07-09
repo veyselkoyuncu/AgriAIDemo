@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { getConversation, createConversation, updateConversation, deleteConversation, isConversationExpired } from "@/lib/conversation/state";
-import { extractFromMessage } from "@/lib/gemini/extractor";
-import { generateResponse } from "@/lib/gemini/responder";
+import { getAIProvider } from "@/lib/ai/provider";
 import { sendWhatsAppMessage, downloadWhatsAppMedia } from "@/lib/whatsapp";
 
 // Meta Webhook Verification (GET)
@@ -162,7 +161,13 @@ export async function POST(request: NextRequest) {
     } else {
       // 7. Extract structured data from the latest message
       console.log(`Extracting entities from message for ${from}...`);
-      const extractorResult = await extractFromMessage(rawMessageText, farmerStatus, history, audioData);
+      const ai = getAIProvider();
+      const extractorResult = await ai.extract({
+        message: rawMessageText,
+        farmerStatus,
+        history,
+        audioData
+      });
       console.log("Extractor Result:", JSON.stringify(extractorResult, null, 2));
 
       // 8. Merge and flow logic
@@ -282,15 +287,16 @@ export async function POST(request: NextRequest) {
 
     // 9. Generate reply message
     console.log(`Generating responder reply for ${from}...`);
-    const replyMessage = await generateResponse(
-      rawMessageText || "[Ses Mesajı]",
-      responderStatus,
-      responderIntent,
-      responderPendingData,
-      responderNextMissingField,
+    const ai = getAIProvider();
+    const replyMessage = await ai.respond({
+      message: rawMessageText || "[Ses Mesajı]",
+      status: responderStatus,
+      intent: responderIntent,
+      pendingData: responderPendingData,
+      nextMissingField: responderNextMissingField,
       farmerStatus,
       history
-    );
+    });
     console.log(`Generated reply: "${replyMessage}"`);
 
     // 10. Save message log to DB
