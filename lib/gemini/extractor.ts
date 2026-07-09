@@ -1,4 +1,4 @@
-import { ExtractorResponse, ActiveSession } from "@/lib/ai/types";
+import { ExtractorResponse, ActiveSession, ProviderError } from "@/lib/ai/types";
 import { getExtractorPrompt } from "@/lib/ai/prompts";
 
 export type { ExtractorResponse };
@@ -58,7 +58,13 @@ export async function extractFromMessage(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+    const retryAfter = response.headers.get("retry-after");
+    const retryAfterSeconds = retryAfter ? parseInt(retryAfter, 10) : undefined;
+    throw new ProviderError(
+      `Gemini API error: ${response.status} - ${errorText}`,
+      response.status,
+      retryAfterSeconds
+    );
   }
 
   const result = await response.json();

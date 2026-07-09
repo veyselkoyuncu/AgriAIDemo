@@ -3,6 +3,8 @@ import { supabase } from "@/lib/supabase";
 import { getConversation, createConversation, updateConversation, deleteConversation, isConversationExpired } from "@/lib/conversation/state";
 import { getAIProvider } from "@/lib/ai/provider";
 import { sendWhatsAppMessage, downloadWhatsAppMedia } from "@/lib/whatsapp";
+import { PerformanceTracker } from "@/lib/utils/perf";
+import { optimizeFarmerStatus, optimizeHistory } from "@/lib/ai/payload-optimizer";
 
 // Meta Webhook Verification (GET)
 export async function GET(request: NextRequest) {
@@ -24,6 +26,7 @@ export async function GET(request: NextRequest) {
 
 // Meta Webhook Message Processing (POST)
 export async function POST(request: NextRequest) {
+  const perf = new PerformanceTracker();
   try {
     const body = await request.json();
 
@@ -56,6 +59,8 @@ export async function POST(request: NextRequest) {
       .select("id")
       .eq("message_id", messageId)
       .maybeSingle();
+
+    perf.milestone("Check duplicate");
 
     if (existingMessage) {
       console.log(`[INFO] Duplicate webhook ignored: ${messageId}`);
@@ -100,6 +105,8 @@ export async function POST(request: NextRequest) {
       console.error("Supabase error fetching farmer status:", statusError);
     }
 
+    perf.milestone("Load Farmer");
+
     const isRegistered = farmerStatus && farmerStatus.registered;
 
     if (!isRegistered) {
@@ -118,6 +125,9 @@ export async function POST(request: NextRequest) {
       // Send outbound WhatsApp message
       await sendWhatsAppMessage(from, reply);
 
+      perf.milestone("WhatsApp API (Not Registered)");
+      console.log(perf.getSummary());
+
       return NextResponse.json({ status: "not_registered", phone: from });
     }
 
@@ -131,6 +141,10 @@ export async function POST(request: NextRequest) {
     }
 
     const history = historyData || [];
+    perf.milestone("Load History");
+
+    const optimizedStatus = optimizeFarmerStatus(farmerStatus);
+    const optimizedHist = optimizeHistory(history);
 
     // 5. Fetch and Validate Conversation State
     let conversation = await getConversation(from);
@@ -139,6 +153,7 @@ export async function POST(request: NextRequest) {
       await deleteConversation(from);
       conversation = null;
     }
+    perf.milestone("Load Conversation");
 
     // 6. Check for Explicit Cancellation Words
     const isCancel = messageType === "text" &&
@@ -158,6 +173,7 @@ export async function POST(request: NextRequest) {
       responderIntent = "unknown";
       responderPendingData = null;
       responderNextMissingField = null;
+      perf.milestone("Cancel Handling");
     } else {
       // 7. Extract structured data from the latest message
       console.log(`Extracting entities from message for ${from}...`);
@@ -175,15 +191,15 @@ export async function POST(request: NextRequest) {
           };
         }
       }
-
       const extractorResult = await ai.extract({
         message: rawMessageText,
-        farmerStatus,
-        history,
+        farmerStatus: optimizedStatus,
+        history: optimizedHist,
         audioData,
         activeSession
       });
       console.log("Extractor Result:", JSON.stringify(extractorResult, null, 2));
+      perf.milestone("Extractor");
 
       // 8. Merge and flow logic
       let isCurrentlyCollecting = conversation && conversation.status === "collecting";
@@ -276,6 +292,7 @@ export async function POST(request: NextRequest) {
           } else {
             console.log("Successfully saved activity:", logResult);
           }
+          perf.milestone("Save Activity");
 
           // Delete conversation state
           await deleteConversation(from);
@@ -309,6 +326,7 @@ export async function POST(request: NextRequest) {
         responderPendingData = conversation ? conversation.pending_data : null;
         responderNextMissingField = conversation?.pending_data?.missing_fields?.[0] || null;
       }
+      perf.milestone("Merge & Flow");
     }
 
     // 9. Generate reply message
@@ -320,10 +338,11 @@ export async function POST(request: NextRequest) {
       intent: responderIntent,
       pendingData: responderPendingData,
       nextMissingField: responderNextMissingField,
-      farmerStatus,
-      history
+      farmerStatus: optimizedStatus,
+      history: optimizedHist
     });
     console.log(`Generated reply: "${replyMessage}"`);
+    perf.milestone("Responder");
 
     // 10. Save message log to DB
     const savedMessageText = rawMessageText || "[Ses Mesajı: Gemini tarafından çözümlendi]";
@@ -342,6 +361,9 @@ export async function POST(request: NextRequest) {
 
     // 11. Send response via WhatsApp
     await sendWhatsAppMessage(from, replyMessage);
+    perf.milestone("WhatsApp API");
+
+    console.log(perf.getSummary());
 
     return NextResponse.json({
       status: "success",

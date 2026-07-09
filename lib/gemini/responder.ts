@@ -1,4 +1,5 @@
 import { getResponderPrompt } from "@/lib/ai/prompts";
+import { ProviderError } from "@/lib/ai/types";
 
 export async function generateResponse(
   message: string,
@@ -44,7 +45,13 @@ export async function generateResponse(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+    const retryAfter = response.headers.get("retry-after");
+    const retryAfterSeconds = retryAfter ? parseInt(retryAfter, 10) : undefined;
+    throw new ProviderError(
+      `Gemini API error: ${response.status} - ${errorText}`,
+      response.status,
+      retryAfterSeconds
+    );
   }
 
   const result = await response.json();

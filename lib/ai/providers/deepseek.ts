@@ -1,4 +1,4 @@
-import { AIProvider, ExtractorRequest, ExtractorResponse, ResponderRequest } from "../types";
+import { AIProvider, ExtractorRequest, ExtractorResponse, ResponderRequest, ProviderError } from "../types";
 import { getExtractorPrompt, getResponderPrompt } from "../prompts";
 
 export class DeepSeekProvider implements AIProvider {
@@ -50,7 +50,13 @@ export class DeepSeekProvider implements AIProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`DeepSeek API error: ${response.status} - ${errorText}`);
+      const retryAfter = response.headers.get("retry-after");
+      const retryAfterSeconds = retryAfter ? parseInt(retryAfter, 10) : undefined;
+      throw new ProviderError(
+        `DeepSeek API error: ${response.status} - ${errorText}`,
+        response.status,
+        retryAfterSeconds
+      );
     }
 
     const result = await response.json();
@@ -109,7 +115,13 @@ export class DeepSeekProvider implements AIProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`DeepSeek API error: ${response.status} - ${errorText}`);
+      const retryAfter = response.headers.get("retry-after");
+      const retryAfterSeconds = retryAfter ? parseInt(retryAfter, 10) : undefined;
+      throw new ProviderError(
+        `DeepSeek API error: ${response.status} - ${errorText}`,
+        response.status,
+        retryAfterSeconds
+      );
     }
 
     const result = await response.json();

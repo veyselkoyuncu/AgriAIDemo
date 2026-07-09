@@ -1,6 +1,7 @@
-import { AIProvider, ExtractorRequest, ExtractorResponse, ResponderRequest } from "./types";
+import { AIProvider, ExtractorRequest, ExtractorResponse, ResponderRequest, ProviderError } from "./types";
 import { GeminiProvider } from "./providers/gemini";
 import { DeepSeekProvider } from "./providers/deepseek";
+import { AIProviderHealthRegistry } from "./provider-health";
 
 class FailoverAIProvider implements AIProvider {
   private providers: AIProvider[];
@@ -18,6 +19,14 @@ class FailoverAIProvider implements AIProvider {
 
     for (let i = 0; i < this.providers.length; i++) {
       const provider = this.providers[i];
+      
+      // Check if provider is healthy
+      if (!AIProviderHealthRegistry.isAvailable(provider.name)) {
+        const remaining = AIProviderHealthRegistry.getRemainingCooldown(provider.name);
+        console.warn(`[AI Failover] Bypassing unhealthy provider ${provider.name} (cooling down for ${remaining}s)...`);
+        continue;
+      }
+
       const start = Date.now();
       try {
         console.log(`[AI Failover] Attempting extract with: ${provider.name}`);
@@ -29,6 +38,15 @@ class FailoverAIProvider implements AIProvider {
         const duration = ((Date.now() - start) / 1000).toFixed(1);
         console.warn(`[AI Log] AI Provider: ${provider.name} | Extractor | duration: ${duration}s | status: error | error: ${err.message || err}`);
         lastError = err;
+
+        // Mark provider as unhealthy if it is a ProviderError with status 429 or 5xx
+        if (err instanceof ProviderError && (err.statusCode === 429 || err.statusCode >= 500)) {
+          const cooldown = err.retryAfterSeconds || 60;
+          AIProviderHealthRegistry.markUnhealthy(provider.name, cooldown, err.message);
+        } else if (!(err instanceof ProviderError)) {
+          // If it's a generic error (e.g. fetch network failure / timeout), apply a default cooldown
+          AIProviderHealthRegistry.markUnhealthy(provider.name, 30, err.message || "Network Error");
+        }
         
         // Log transition to next provider if available
         if (i < this.providers.length - 1) {
@@ -45,6 +63,14 @@ class FailoverAIProvider implements AIProvider {
 
     for (let i = 0; i < this.providers.length; i++) {
       const provider = this.providers[i];
+
+      // Check if provider is healthy
+      if (!AIProviderHealthRegistry.isAvailable(provider.name)) {
+        const remaining = AIProviderHealthRegistry.getRemainingCooldown(provider.name);
+        console.warn(`[AI Failover] Bypassing unhealthy provider ${provider.name} (cooling down for ${remaining}s)...`);
+        continue;
+      }
+
       const start = Date.now();
       try {
         console.log(`[AI Failover] Attempting respond with: ${provider.name}`);
@@ -56,6 +82,15 @@ class FailoverAIProvider implements AIProvider {
         const duration = ((Date.now() - start) / 1000).toFixed(1);
         console.warn(`[AI Log] AI Provider: ${provider.name} | Responder | duration: ${duration}s | status: error | error: ${err.message || err}`);
         lastError = err;
+
+        // Mark provider as unhealthy if it is a ProviderError with status 429 or 5xx
+        if (err instanceof ProviderError && (err.statusCode === 429 || err.statusCode >= 500)) {
+          const cooldown = err.retryAfterSeconds || 60;
+          AIProviderHealthRegistry.markUnhealthy(provider.name, cooldown, err.message);
+        } else if (!(err instanceof ProviderError)) {
+          // If it's a generic error (e.g. fetch network failure / timeout), apply a default cooldown
+          AIProviderHealthRegistry.markUnhealthy(provider.name, 30, err.message || "Network Error");
+        }
 
         // Log transition to next provider if available
         if (i < this.providers.length - 1) {

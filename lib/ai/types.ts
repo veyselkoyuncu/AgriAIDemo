@@ -1,3 +1,15 @@
+export class ProviderError extends Error {
+  statusCode: number;
+  retryAfterSeconds?: number;
+
+  constructor(message: string, statusCode: number, retryAfterSeconds?: number) {
+    super(message);
+    this.name = "ProviderError";
+    this.statusCode = statusCode;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 export interface ExtractorResponse {
   intent: "activity" | "question" | "unknown";
   activity_type: "fertilization" | "spraying" | "irrigation" | "harvesting" | "planting" | null;
