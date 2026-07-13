@@ -12,13 +12,7 @@ export class DeepSeekProvider implements AIProvider {
       console.warn("[DeepSeek] Audio input is not supported by DeepSeek. Returning unknown intent.");
       return {
         intent: "unknown",
-        activity_type: null,
-        farm: null,
-        crop: null,
-        product: null,
-        quantity: null,
-        date: null,
-        is_new_activity: false,
+        activities: []
       };
     }
 
@@ -72,13 +66,7 @@ export class DeepSeekProvider implements AIProvider {
       console.error("Failed to parse DeepSeek JSON output:", rawText);
       return {
         intent: "unknown",
-        activity_type: null,
-        farm: null,
-        crop: null,
-        product: null,
-        quantity: null,
-        date: null,
-        is_new_activity: false,
+        activities: []
       };
     }
   }

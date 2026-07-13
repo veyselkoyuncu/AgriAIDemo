@@ -53,28 +53,32 @@ Devam eden bir konuşma kaydı var:
 GÖREV: Kullanıcının son mesajını analiz et. İki olasılık var:
 
 A) Kullanıcı botu soru yanıtladı veya bir düzeltme yaptı (normal durum):
-   - "${next_missing_field}" alanının değerini çıkar.
-   - Diğer tüm alanları null bırak.
-   - is_new_activity = false döndür.
+   - Yanıtlanan alanı veya alanları çıkar.
+   - Diğer alanları null bırak.
+   - Her alan için bir güven skoru (0.0 - 1.0 arası) belirle.
 
 B) Kullanıcı açıkça mevcut kaydı bırakıp YENİ bir aktivite başlattı:
-   Örnek: "Hayır, biberi suladım", "Bırak onu, domatesleri hasat ettim", "Aslında gübreleme yaptım"
-   Bu durumda is_new_activity = true döndür ve yeni aktivite bilgilerini ilgili alanlara doldur.
-   DİKKAT: "Hayır, Çayır tarlası" gibi ifadeler yeni aktivite DEĞİLDİR, mevcut alan düzeltmesidir.
-   DİKKAT: Selamlaşma, emoji, teşekkür, onay ("tamam", "👍") yeni aktivite DEĞİLDİR.
+   Örnek: "Hayır, biberi suladım", "Bırak onu, domatesleri hasat ettim"
+   Bu durumda yeni aktivite bilgilerini çıkar.
+   DİKKAT: "Hayır, Çayır tarlası" gibi ifadeler yeni aktivite DEĞİLDİR.
+
+ÖNEMLİ KURAL: "bugün", "dün", "oraya", "ona" gibi göreceli zaman veya yer bildiren ifadeleri KESİNLİKLE gerçek tarihe veya yere dönüştürme (resolve etme). Çiftçi tam olarak ne dediyse onu "value" olarak kaydet. Sistemin Node.js katmanı bu kelimeleri sonradan çözecektir.
 
 ${domainRules}
 
-JSON formatı (tüm alanları döndür, ilgisiz olanları null yap):
+JSON formatı:
 {
   "intent": "activity",
-  "activity_type": null,
-  "farm": null,
-  "crop": null,
-  "product": null,
-  "quantity": null,
-  "date": null,
-  "is_new_activity": false
+  "activities": [
+    {
+      "activity_type": { "value": null, "confidence": 1.0 },
+      "farm": { "value": null, "confidence": 1.0 },
+      "crop": { "value": null, "confidence": 1.0 },
+      "product": { "value": null, "confidence": 1.0 },
+      "quantity": { "value": null, "confidence": 1.0 },
+      "date": { "value": null, "confidence": 1.0 }
+    }
+  ]
 }`;
   }
 
@@ -89,48 +93,41 @@ ${JSON.stringify(farmerStatus, null, 2)}
 Çiftçinin son faaliyet geçmişi:
 ${JSON.stringify(history, null, 2)}
 
+ÖNEMLİ KURAL 1: Kullanıcı TEK BİR MESAJDA BİRDEN FAZLA faaliyet belirtebilir.
+Örn: "Dere tarlasındaki domatese ilaç yaptım, sonra suladım."
+Bu durumda "activities" dizisi içine 2 ayrı nesne ekle (biri ilaçlama, diğeri sulama için).
+
+ÖNEMLİ KURAL 2: "bugün", "dün", "oraya", "aynı yere", "ona" gibi göreceli zaman veya yer bildiren ifadeleri KESİNLİKLE gerçek tarihe veya yere dönüştürme (resolve etme). Çiftçi ne dediyse ("bugün", "oraya") onu "value" olarak yaz.
+
 ${domainRules}
 
 ÇIKARILACAK ALANLAR:
+1. "intent": Çiftçinin niyeti: "activity", "question", "unknown".
+2. "activities": Çıkarılan faaliyetlerin listesi.
 
-1. "intent": Çiftçinin niyeti:
-   - "activity": Bir tarımsal faaliyeti bildiriyor veya devam eden bir soruya cevap veriyor.
-     (Örn: "Bugün ilaç attım", "Dere tarlası", "150 litre", "Bravo 250 SC")
-   - "question": Tarımsal bir soru soruyor.
-     (Örn: "Domatese ne kadar gübre atmalıyım?", "Yapraklar sarardı ne yapayım?")
-   - "unknown": Selamlaşma, teşekkür, emoji, anlaşılmaz ifade, onay kelimesi.
-     (Örn: "selam", "👍", "tamam", "sağ ol", "iptal", "vazgeçtim")
+Her faaliyet için çıkarılacak alanlar:
+- "activity_type": "fertilization", "spraying", "irrigation", "harvesting", "planting" veya null.
+- "farm": Tarla adı (örn: "dere tarlası", "oraya", "aynı yere").
+- "crop": Ürün adı (örn: "domates", "ona", "aynı ürüne").
+- "product": Kullanılan ilaç / gübre adı (sayılar dahil tam).
+- "quantity": Çiftçinin söylediği miktar ifadesi aynen.
+- "date": Söylenen tarih kelimesi aynen (örn: "bugün", "dün").
 
-2. "activity_type": Intent "activity" ise şunlardan biri, değilse null:
-   - "fertilization" → Gübreleme
-   - "spraying"      → İlaçlama
-   - "irrigation"    → Sulama
-   - "harvesting"    → Hasat
-   - "planting"      → Ekim / Dikim
-
-3. "farm": Tarla adı. Kayıtlı tarlalarla eşleştir. Yoksa null.
-
-4. "crop": Ürün adı (Domates, Biber, Buğday…). Kayıtlılarla eşleştir. Yoksa null.
-
-5. "product": Kullanılan ilaç / gübre / tohum adı. Tam adı yaz (sayılar dahil). Yoksa null.
-
-6. "quantity": Çiftçinin söylediği miktar ifadesi aynen. Normalize etme. Yoksa null.
-
-7. "date": Belirtilen tarih, YYYY-MM-DD formatında. Göreceli ("dün", "2 gün önce") ise
-   bugünün tarihini (${todayStr}) baz alarak hesapla. Belirtilmemişse null.
-
-8. "is_new_activity": Normal modda her zaman false.
+Her alan için: { "value": "...", "confidence": 0.95 } formatında dön. Emin değilsen confidence'ı düşük tut.
 
 JSON formatı:
 {
   "intent": "activity" | "question" | "unknown",
-  "activity_type": string | null,
-  "farm": string | null,
-  "crop": string | null,
-  "product": string | null,
-  "quantity": string | null,
-  "date": string | null,
-  "is_new_activity": false
+  "activities": [
+    {
+      "activity_type": { "value": "...", "confidence": 0.9 },
+      "farm": { "value": "...", "confidence": 0.9 },
+      "crop": { "value": "...", "confidence": 0.9 },
+      "product": { "value": "...", "confidence": 0.9 },
+      "quantity": { "value": "...", "confidence": 0.9 },
+      "date": { "value": "...", "confidence": 0.9 }
+    }
+  ]
 }`;
 }
 

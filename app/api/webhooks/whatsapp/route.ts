@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { getConversation, createConversation, updateConversation, deleteConversation, isConversationExpired } from "@/lib/conversation/state";
+import { getConversation, createConversation, updateConversation, deleteConversation, isConversationExpired, ConversationContext, ConversationStatus } from "@/lib/conversation/state";
 import { getAIProvider } from "@/lib/ai/provider";
 import { sendWhatsAppMessage, downloadWhatsAppMedia } from "@/lib/whatsapp";
 import { PerformanceTracker } from "@/lib/utils/perf";
 import { optimizeFarmerStatus, optimizeHistory } from "@/lib/ai/payload-optimizer";
+import { getMissingFields } from "@/lib/conversation/activity-rules";
+import { resolveContext, inheritContext } from "@/lib/conversation/context-resolver";
 
 // Meta Webhook Verification (GET)
 export async function GET(request: NextRequest) {
@@ -164,6 +166,15 @@ export async function POST(request: NextRequest) {
     let responderPendingData: any = null;
     let responderNextMissingField: string | null = null;
 
+    let ctx: ConversationContext = conversation?.state_data || {
+      currentActivity: null,
+      pendingActivities: [],
+      completedActivities: [],
+      resolvedContext: {},
+      extractedEntities: null,
+      history: optimizedHist
+    };
+
     if (isCancel) {
       console.log(`[INFO] Farmer ${from} requested cancellation.`);
       if (conversation) {
@@ -175,23 +186,19 @@ export async function POST(request: NextRequest) {
       responderNextMissingField = null;
       perf.milestone("Cancel Handling");
     } else {
-      // 7. Extract structured data from the latest message
       console.log(`Extracting entities from message for ${from}...`);
       const ai = getAIProvider();
 
       let activeSession = undefined;
-      if (conversation && conversation.status === "collecting") {
-        const activity_type = conversation.pending_data?.activity_type;
-        const next_missing_field = conversation.pending_data?.missing_fields?.[0];
-        if (activity_type && next_missing_field) {
-          activeSession = {
-            activity_type,
-            next_missing_field,
-            pending_data: conversation.pending_data
-          };
-        }
+      if (ctx.currentActivity && getMissingFields(ctx.currentActivity).length > 0) {
+        activeSession = {
+          activity_type: ctx.currentActivity.activity_type,
+          next_missing_field: getMissingFields(ctx.currentActivity)[0],
+          pending_data: ctx.currentActivity
+        };
       }
-      const extractorResult = await ai.extract({
+
+      const extractorResult: any = await ai.extract({
         message: rawMessageText,
         farmerStatus: optimizedStatus,
         history: optimizedHist,
@@ -201,132 +208,143 @@ export async function POST(request: NextRequest) {
       console.log("Extractor Result:", JSON.stringify(extractorResult, null, 2));
       perf.milestone("Extractor");
 
-      // 8. Merge and flow logic
-      let isCurrentlyCollecting = conversation && conversation.status === "collecting";
+      ctx.extractedEntities = extractorResult;
 
-      if (isCurrentlyCollecting && extractorResult.is_new_activity) {
-        console.log(`[INFO] New activity detected during active session for ${from}. Resetting session...`);
-        await deleteConversation(from);
-        conversation = null;
-        isCurrentlyCollecting = false;
+      let stateStatus: ConversationStatus = conversation ? conversation.status : "NEW";
+
+      if (stateStatus === "NEW" || extractorResult.intent === "activity" || stateStatus === "WAITING_REQUIRED_FIELDS") {
+        stateStatus = "EXTRACTING";
       }
 
-      if (extractorResult.intent === "activity" || isCurrentlyCollecting) {
-        // Run Node.js Merge Logic
-        const baseActivity = conversation?.pending_data || {
-          activity_type: null,
-          farm: null,
-          crop: null,
-          product: null,
-          quantity: null,
-          date: null,
-          missing_fields: []
-        };
-
-        const mergedActivity = { ...baseActivity };
-
-        // Overwrite only if the extractor returned a new non-null value
-        const fields = ["activity_type", "farm", "crop", "product", "quantity", "date"] as const;
-        for (const field of fields) {
-          // Lock activity_type if we are currently collecting
-          if (field === "activity_type" && isCurrentlyCollecting && baseActivity.activity_type) {
-            continue;
-          }
-          const val = extractorResult[field];
-          if (val !== undefined && val !== null && val !== "") {
-            mergedActivity[field] = val as any;
-          }
-        }
-
-        // Default the date field to today's date if missing
-        if (!mergedActivity.date) {
-          const trDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
-          const year = trDate.getFullYear();
-          const month = String(trDate.getMonth() + 1).padStart(2, '0');
-          const day = String(trDate.getDate()).padStart(2, '0');
-          mergedActivity.date = `${year}-${month}-${day}`;
-        }
-
-        // Calculate missing fields programmatically
-        const missingFields: string[] = [];
-        if (!mergedActivity.activity_type) {
-          missingFields.push("activity_type");
-        } else {
-          if (!mergedActivity.farm) missingFields.push("farm");
-          if (!mergedActivity.crop) missingFields.push("crop");
-          
-          if (mergedActivity.activity_type === "fertilization" || mergedActivity.activity_type === "spraying") {
-            if (!mergedActivity.product) missingFields.push("product");
-          }
-          if (!mergedActivity.quantity) missingFields.push("quantity");
-        }
-
-        const nextMissingField = missingFields.length > 0 ? missingFields[0] : null;
-        mergedActivity.missing_fields = missingFields;
-
-        if (missingFields.length === 0) {
-          // Activity is complete!
-          responderStatus = "completed";
-          responderIntent = "activity";
-          responderPendingData = mergedActivity;
-          responderNextMissingField = null;
-
-          // Save Activity via Supabase RPC
-          console.log(`[INFO] Activity complete. Logging activity for ${from}...`);
-          const { data: logResult, error: logError } = await supabase.rpc("log_farmer_activity", {
-            p_phone: from,
-            p_farm_name: mergedActivity.farm,
-            p_crop_name: mergedActivity.crop,
-            p_activity_data: {
-              activity_type: mergedActivity.activity_type,
-              product: mergedActivity.product,
-              quantity: mergedActivity.quantity,
-              farm_name: mergedActivity.farm,
-              crop_name: mergedActivity.crop,
-              date: mergedActivity.date
-            }
-          });
-
-          if (logError) {
-            console.error("Supabase error saving activity via RPC:", logError);
-          } else {
-            console.log("Successfully saved activity:", logResult);
-          }
-          perf.milestone("Save Activity");
-
-          // Delete conversation state
-          await deleteConversation(from);
-        } else {
-          // Incomplete. Save state and continue collecting
-          responderStatus = "collecting";
-          responderIntent = "activity";
-          responderPendingData = mergedActivity;
-          responderNextMissingField = nextMissingField;
-
-          if (conversation) {
-            await updateConversation(from, {
-              intent: "activity",
-              status: "collecting",
-              pending_data: mergedActivity
-            });
-          } else {
-            await createConversation(from, "activity", "collecting", mergedActivity);
-          }
-        }
-      } else if (extractorResult.intent === "question") {
-        // Question interruption - keep existing session alive if any
-        responderStatus = conversation ? (conversation.status as any) : "idle";
-        responderIntent = "question";
-        responderPendingData = conversation ? conversation.pending_data : null;
-        responderNextMissingField = conversation?.pending_data?.missing_fields?.[0] || null;
+      if (stateStatus !== "EXTRACTING" && (extractorResult.intent === "question" || extractorResult.intent === "unknown")) {
+        responderIntent = extractorResult.intent;
+        responderStatus = "idle";
       } else {
-        // Unknown interruption (greetings, emoji, acknowledgment) - keep existing session alive
-        responderStatus = conversation ? (conversation.status as any) : "idle";
-        responderIntent = "unknown";
-        responderPendingData = conversation ? conversation.pending_data : null;
-        responderNextMissingField = conversation?.pending_data?.missing_fields?.[0] || null;
+        responderIntent = "activity";
+        let runLoop = true;
+        
+        while(runLoop) {
+          console.log(`[STATE MACHINE] Current State: ${stateStatus}`);
+          switch(stateStatus) {
+            case "EXTRACTING":
+              if (extractorResult.activities && extractorResult.activities.length > 0) {
+                if (ctx.currentActivity) {
+                   const extracted = extractorResult.activities[0];
+                   const fields = ["activity_type", "farm", "crop", "product", "quantity", "date"] as const;
+                   for (const field of fields) {
+                     const entity = extracted[field];
+                     if (entity && entity.value && entity.confidence >= 0.7) {
+                       ctx.currentActivity[field] = resolveContext(entity.value as string, field as any, ctx);
+                     }
+                   }
+                   for (let i = 1; i < extractorResult.activities.length; i++) {
+                     ctx.pendingActivities.push(extractorResult.activities[i]);
+                   }
+                } else {
+                   for (const act of extractorResult.activities) {
+                     ctx.pendingActivities.push(act);
+                   }
+                }
+              }
+              stateStatus = "NEXT_ACTIVITY";
+              break;
+
+            case "NEXT_ACTIVITY":
+              if (!ctx.currentActivity) {
+                if (ctx.pendingActivities.length > 0) {
+                  const rawAct = ctx.pendingActivities.shift();
+                  ctx.currentActivity = {
+                     activity_type: rawAct.activity_type?.value || null,
+                     farm: resolveContext(rawAct.farm?.value, "farm", ctx),
+                     crop: resolveContext(rawAct.crop?.value, "crop", ctx),
+                     product: rawAct.product?.value || null,
+                     quantity: rawAct.quantity?.value || null,
+                     date: resolveContext(rawAct.date?.value, "date", ctx)
+                  };
+                  stateStatus = "MERGING";
+                } else {
+                  stateStatus = "FINISHED";
+                }
+              } else {
+                 stateStatus = "MERGING";
+              }
+              break;
+
+            case "MERGING":
+              inheritContext(ctx.currentActivity, ctx);
+              stateStatus = "WAITING_REQUIRED_FIELDS";
+              break;
+
+            case "WAITING_REQUIRED_FIELDS":
+              const missing = getMissingFields(ctx.currentActivity);
+              if (missing.length > 0) {
+                 responderStatus = "collecting";
+                 responderPendingData = ctx.currentActivity;
+                 responderNextMissingField = missing[0];
+                 runLoop = false; // WAIT FOR USER
+              } else {
+                 stateStatus = "READY_TO_SAVE";
+              }
+              break;
+
+            case "READY_TO_SAVE":
+              if (!ctx.currentActivity.date) {
+                const trDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
+                ctx.currentActivity.date = `${trDate.getFullYear()}-${String(trDate.getMonth() + 1).padStart(2, '0')}-${String(trDate.getDate()).padStart(2, '0')}`;
+              }
+              stateStatus = "SAVED";
+              break;
+
+            case "SAVED":
+              console.log(`[INFO] Activity complete. Logging activity for ${from}...`);
+              const { data: logResult, error: logError } = await supabase.rpc("log_farmer_activity", {
+                p_phone: from,
+                p_farm_name: ctx.currentActivity.farm,
+                p_crop_name: ctx.currentActivity.crop,
+                p_activity_data: {
+                  activity_type: ctx.currentActivity.activity_type,
+                  product: ctx.currentActivity.product,
+                  quantity: ctx.currentActivity.quantity,
+                  farm_name: ctx.currentActivity.farm,
+                  crop_name: ctx.currentActivity.crop,
+                  date: ctx.currentActivity.date
+                }
+              });
+
+              if (logError) {
+                console.error("Supabase error saving activity via RPC:", logError);
+              } else {
+                console.log("Successfully saved activity:", logResult);
+              }
+              
+              ctx.completedActivities.push({ ...ctx.currentActivity });
+              ctx.currentActivity = null;
+              
+              stateStatus = "NEXT_ACTIVITY";
+              break;
+
+            case "FINISHED":
+              responderStatus = "completed";
+              responderPendingData = ctx.completedActivities.length > 0 ? ctx.completedActivities[ctx.completedActivities.length - 1] : null;
+              responderNextMissingField = null;
+              runLoop = false;
+              break;
+          }
+        }
       }
-      perf.milestone("Merge & Flow");
+
+      if (stateStatus === "FINISHED") {
+         if (conversation) {
+            await deleteConversation(from);
+         }
+      } else {
+         if (conversation) {
+            await updateConversation(from, { intent: responderIntent, status: stateStatus, state_data: ctx });
+         } else {
+            await createConversation(from, responderIntent, stateStatus, ctx);
+         }
+      }
+      perf.milestone("State Machine & Flow");
     }
 
     // 9. Generate reply message
