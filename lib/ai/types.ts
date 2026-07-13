@@ -10,21 +10,23 @@ export class ProviderError extends Error {
   }
 }
 
+export interface ExtractedEntity<T> {
+  value: T;
+  confidence: number;
+}
+
+export interface ExtractedActivity {
+  activity_type: ExtractedEntity<"fertilization" | "spraying" | "irrigation" | "harvesting" | "planting" | null>;
+  farm: ExtractedEntity<string | null>;
+  crop: ExtractedEntity<string | null>;
+  product: ExtractedEntity<string | null>;
+  quantity: ExtractedEntity<string | null>;
+  date: ExtractedEntity<string | null>;
+}
+
 export interface ExtractorResponse {
   intent: "activity" | "question" | "unknown";
-  activity_type: "fertilization" | "spraying" | "irrigation" | "harvesting" | "planting" | null;
-  farm: string | null;
-  crop: string | null;
-  product: string | null;
-  quantity: string | null;
-  date: string | null;
-  /**
-   * Collection Mode only.
-   * true  → user is clearly starting a brand new activity (e.g. "Hayır, biberi suladım").
-   *         Node will delete the current session and start fresh.
-   * false → user's message is a normal answer or correction within the current session.
-   */
-  is_new_activity: boolean;
+  activities: ExtractedActivity[];
 }
 
 export interface ActiveSession {

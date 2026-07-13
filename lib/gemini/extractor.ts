@@ -80,13 +80,7 @@ export async function extractFromMessage(
     console.error("Failed to parse Gemini JSON output:", rawText);
     return {
       intent: "unknown",
-      activity_type: null,
-      farm: null,
-      crop: null,
-      product: null,
-      quantity: null,
-      date: null,
-      is_new_activity: false,
+      activities: []
     };
   }
 }
