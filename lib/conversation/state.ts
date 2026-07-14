@@ -12,10 +12,21 @@ export type ConversationStatus =
   | "FINISHED"
   | "CANCELLED";
 
+export interface ActivityState {
+  activity_type: string | null;
+  farm: string | null;
+  crop: string | null;
+  product: string | null;
+  quantity: string | null;
+  date: string | null;
+  farm_id?: string | null;
+  crop_id?: string | null;
+}
+
 export interface ConversationContext {
-  currentActivity: any | null;
+  currentActivity: ActivityState | null;
   pendingActivities: any[];
-  completedActivities: any[];
+  completedActivities: ActivityState[];
   resolvedContext: any;
   extractedEntities: ExtractorResponse | null;
   history: any[];
