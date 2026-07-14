@@ -1,87 +1,521 @@
-# 🌱 AgriAI - Conversational Agricultural Activity Logging
+# 🌱 AgriAI
 
-**AgriAI** is an intelligent, WhatsApp-based conversational assistant designed to help farmers effortlessly log their daily agricultural activities using natural language.
+> AI-powered conversational farm management through WhatsApp.
 
-Instead of navigating complex forms, farmers simply chat with the AI (e.g., *"Bugün bibere ilaç attım"*). The system intelligently extracts structured data (activity type, crop, product, quantity, farm location) and seamlessly manages conversational state, asking follow-up questions only for missing information.
+AgriAI is an AI-first agricultural assistant that allows farmers to record daily farming activities simply by chatting on WhatsApp.
 
-![AgriAI Development Status](https://img.shields.io/badge/Status-Active_Development-success?style=for-the-badge)
+Instead of filling forms or navigating complicated interfaces, farmers naturally describe what they did.
 
-> 🚀 **Note:** This project is under **active development**. We are constantly refining our NLP extraction pipelines, optimizing state management, and expanding support for complex agricultural workflows.
+Example:
+
+> "Bugün dere tarlasındaki domateslere Bravo attım."
+
+AgriAI understands the message, extracts structured information, asks only for missing details, and stores everything in a normalized database.
+
+The goal is simple:
+
+**Make agricultural record keeping feel like chatting with another farmer.**
 
 ---
 
-## ✨ Features
+# Demo Conversation
 
-- **🗣️ Natural Language Processing:** Understands unstructured, conversational input, heavily optimized for agricultural terminology and context.
-- **🧠 Smart State Management:** Node.js backend strictly owns the conversational flow, utilizing LLMs purely for translation of text to structured values.
-- **🔄 Context-Aware Extraction:** Remembers the active `activity_type` and intelligently processes follow-up messages (e.g., knowing that "8 teneke" refers to the quantity of a previously mentioned pesticide).
-- **🛡️ AI Provider Failover:** Built-in Smart AI Provider Health abstraction. Uses **Gemini** as the primary engine with automatic failover to **DeepSeek** in case of rate limits or timeouts.
-- **📱 WhatsApp Integration:** End-to-end integration with WhatsApp webhooks for a frictionless, on-the-go user experience.
-- **💾 Persistent Sessions:** Robust conversation interruption and resume capabilities backed by a secure database.
+Farmer
 
-## 🏗️ Architecture
+```text
+Bugün domatese bravo attım.
+```
 
-AgriAI is built on a modern, robust stack:
-- **Framework:** [Next.js](https://nextjs.org/)
-- **Database:** [Supabase](https://supabase.com/)
-- **AI Engine:** Google Gemini & DeepSeek (via custom `FailoverAIProvider`)
-- **Integration:** WhatsApp Business API
+Assistant
 
-### How it works
-1. **Webhook Reception:** A WhatsApp message hits our Next.js API route.
-2. **State Retrieval:** The system fetches the current conversation state for the farmer.
-3. **AI Extraction:** The message is passed to the active AI Provider, which returns structured JSON identifying intent and extracting entities.
-4. **Deterministic Merge Logic:** Node.js merges the AI's extraction with the existing state and calculates `next_missing_field` deterministically.
-5. **Response Generation:** If fields are missing, the AI generates a natural, contextual follow-up question.
-6. **Persistence:** State is saved, and the message is sent back to the user via WhatsApp.
+```text
+Hangi tarladaki domateslere uyguladınız?
+```
 
-## 🚀 Getting Started
+Farmer
 
-### Prerequisites
+```text
+Dere tarlasında.
+```
 
-- Node.js 18+
-- Supabase Project
-- WhatsApp Business API credentials
-- Gemini API Key / DeepSeek API Key
+Assistant
 
-### Installation
+```text
+Kaç litre kullandınız?
+```
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/veyselkoyuncu/AgriAIDemo.git
-   cd agri-ai
-   ```
+Farmer
 
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+```text
+25 litre.
+```
 
-3. Set up environment variables:
-   Create a `.env.local` file and configure your credentials:
-   ```env
-   # Supabase
-   NEXT_PUBLIC_SUPABASE_URL=your_url
-   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_key
-   
-   # AI Provider
-   AI_PROVIDER=gemini
-   GEMINI_API_KEY=your_gemini_key
-   DEEPSEEK_API_KEY=your_deepseek_key
-   ```
+Assistant
 
-4. Run the development server:
-   ```bash
-   npm run dev
-   ```
+```text
+Kaydettim.
+```
 
-## 🛠️ Ongoing Development
+No forms.
 
-We are actively iterating on the core pipeline. Current focus areas include:
-- ⚡ **Performance & Observability:** Implementing end-to-end performance timing and smart provider health monitoring.
-- 📦 **Payload Optimization:** Reducing token footprint by passing compact JSON state histories to the LLM.
-- 🎯 **Advanced Intent Recognition:** Further reducing LLM hallucinations by tightening the extraction constraints and giving Node.js more control over the conversation boundaries.
+No buttons.
 
-## 🤝 Contributing
+Just conversation.
 
-Contributions, issues, and feature requests are welcome! Since the project is in active development, please open an issue first to discuss any major architectural changes.
+---
+
+# Features
+
+## Conversational Activity Logging
+
+Record agricultural activities using natural language.
+
+Supported activities include:
+
+- Irrigation
+- Spraying
+- Fertilization
+- Harvest
+- Planting
+- Soil Preparation
+
+---
+
+## Intelligent Multi-step Conversations
+
+The assistant automatically asks only for missing information.
+
+Example:
+
+User
+
+```text
+Bugün patatese sulama yaptım.
+```
+
+Assistant
+
+```text
+Hangi tarlada?
+```
+
+User
+
+```text
+Ziya Paşa.
+```
+
+Assistant
+
+```text
+Kaç saat sürdü?
+```
+
+No repeated questions.
+
+No unnecessary confirmations.
+
+---
+
+## Context Awareness
+
+The assistant remembers conversation context.
+
+Example
+
+```text
+Bugün domatese bravo attım.
+
+↓
+
+Dere tarlasında.
+
+↓
+
+25 litre.
+```
+
+The user never repeats:
+
+- activity
+- crop
+- farm
+- product
+
+unless necessary.
+
+---
+
+## Multiple Activities
+
+A single message can contain multiple operations.
+
+Example
+
+```text
+Sabah sulama yaptım sonra bravo attım.
+```
+
+Automatically becomes
+
+Queue
+
+```
+Irrigation
+
+↓
+
+Spraying
+```
+
+Each activity is completed individually.
+
+---
+
+## Data Normalization
+
+User input
+
+```text
+yaklaşık 2 buçuk kilo kadar
+```
+
+Stored value
+
+```text
+2.5 kg
+```
+
+Supports
+
+- Quantity normalization
+- Turkish number parsing
+- Unit normalization
+- Date normalization
+
+---
+
+## Date Understanding
+
+Examples
+
+```
+bugün
+
+dün
+
+3 gün önce
+
+geçen cuma
+
+geçen hafta
+```
+
+Automatically converted into ISO dates.
+
+---
+
+## Product Dictionary
+
+Recognizes agricultural products.
+
+Examples
+
+```
+Bravo
+
+Bravo 250
+
+DAP
+
+Üre
+
+15-15-15
+
+Nativo
+
+Score
+```
+
+Mapped into canonical database values.
+
+---
+
+## Farm Alias Engine
+
+Farmers rarely use official field names.
+
+AgriAI understands aliases.
+
+Example
+
+```
+ev önü
+
+↓
+
+Evin Önü
+```
+
+```
+aynı tarla
+
+↓
+
+previous field
+```
+
+```
+orada
+
+↓
+
+active field
+```
+
+---
+
+## AI Validation Layer
+
+LLMs are never trusted blindly.
+
+Every extracted entity is validated by Node.js.
+
+If confidence is low:
+
+AI
+
+↓
+
+Validation Layer
+
+↓
+
+Database
+
+↓
+
+Conversation
+
+The server always owns the truth.
+
+---
+
+## Duplicate Detection
+
+If the same activity is submitted again within five minutes:
+
+Instead of saving immediately:
+
+Assistant asks
+
+```
+Bu kayıt az önce oluşturuldu.
+
+Tekrar kaydetmek istiyor musunuz?
+```
+
+---
+
+## Provider Failover
+
+Automatic AI failover.
+
+Priority
+
+```
+Gemini
+
+↓
+
+DeepSeek
+
+↓
+
+Future Providers
+```
+
+If one provider becomes unavailable:
+
+The conversation continues automatically.
+
+---
+
+## Persistent Conversations
+
+Users can stop chatting and continue later.
+
+Conversation state survives interruptions.
+
+---
+
+# Architecture
+
+```
+WhatsApp
+
+↓
+
+Webhook
+
+↓
+
+Conversation Manager
+
+↓
+
+AI Provider
+
+↓
+
+Extraction
+
+↓
+
+Validation
+
+↓
+
+State Machine
+
+↓
+
+Supabase
+
+↓
+
+WhatsApp Response
+```
+
+The LLM is responsible only for understanding language.
+
+Business logic always remains deterministic inside Node.js.
+
+---
+
+# Tech Stack
+
+| Layer | Technology |
+|---------|------------|
+| Framework | Next.js 15 |
+| Language | TypeScript |
+| Database | Supabase |
+| AI | Gemini + DeepSeek |
+| Messaging | WhatsApp Business API |
+| Runtime | Node.js |
+
+---
+
+# Project Structure
+
+```
+app/
+components/
+lib/
+
+  ai/
+  conversation/
+  normalization/
+  responders/
+  state-machine/
+
+supabase/
+
+prompts/
+```
+
+---
+
+# Current Development Status
+
+Current progress
+
+- ✅ Sprint 1 — Conversation Engine
+- ✅ Sprint 2 — Data Quality
+- 🚧 Sprint 3 — Dashboard
+- ⏳ Sprint 4 — Farmer Experience
+- ⏳ Sprint 5 — AI Memory
+- ⏳ Sprint 6 — Operations
+- ⏳ Sprint 7 — Intelligence
+- ⏳ Sprint 8 — Scale
+
+---
+
+# Philosophy
+
+AgriAI follows one simple rule.
+
+> AI should understand language.
+
+> The application should make decisions.
+
+Large Language Models are excellent at interpreting natural language.
+
+They should not control business rules.
+
+All conversation flow, validation, normalization, state transitions, and persistence are deterministic.
+
+---
+
+# Future Roadmap
+
+- Weather integration
+- Disease prediction
+- Irrigation recommendations
+- Fertilizer recommendations
+- Yield prediction
+- Harvest forecasting
+- Market prices
+- Multi-farm support
+- Family accounts
+- Mobile PWA
+
+---
+
+# Installation
+
+```bash
+git clone https://github.com/veyselkoyuncu/AgriAIDemo.git
+
+cd AgriAIDemo
+
+npm install
+
+npm run dev
+```
+
+Create
+
+```
+.env.local
+```
+
+Configure
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=
+
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+
+GEMINI_API_KEY=
+
+DEEPSEEK_API_KEY=
+```
+
+---
+
+# Contributing
+
+Contributions are welcome.
+
+Before implementing major architectural changes, please open an issue for discussion.
+
+---
+
+# License
+
+MIT
+
+---
+
+Built with ❤️ to make agricultural record keeping effortless.
