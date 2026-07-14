@@ -2,6 +2,7 @@ import { AIProvider, ExtractorRequest, ExtractorResponse, ResponderRequest, Prov
 import { GeminiProvider } from "./providers/gemini";
 import { DeepSeekProvider } from "./providers/deepseek";
 import { AIProviderHealthRegistry } from "./provider-health";
+import { validateExtractorResponse } from "./output-validator";
 
 class FailoverAIProvider implements AIProvider {
   private providers: AIProvider[];
@@ -30,7 +31,9 @@ class FailoverAIProvider implements AIProvider {
       const start = Date.now();
       try {
         console.log(`[AI Failover] Attempting extract with: ${provider.name}`);
-        const result = await provider.extract(request);
+        const rawResult = await provider.extract(request);
+        // Sprint 2 Item 7: Validate AI output structure before using
+        const result = validateExtractorResponse(rawResult);
         const duration = ((Date.now() - start) / 1000).toFixed(1);
         console.log(`[AI Log] AI Provider: ${provider.name} | Extractor | duration: ${duration}s | status: success`);
         return result;

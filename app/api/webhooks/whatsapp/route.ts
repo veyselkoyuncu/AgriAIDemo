@@ -6,7 +6,68 @@ import { sendWhatsAppMessage, downloadWhatsAppMedia } from "@/lib/whatsapp";
 import { PerformanceTracker } from "@/lib/utils/perf";
 import { optimizeFarmerStatus, optimizeHistory } from "@/lib/ai/payload-optimizer";
 import { getMissingFields } from "@/lib/conversation/activity-rules";
-import { resolveContext, inheritContext, mergeExtractedActivity } from "@/lib/conversation/context-resolver";
+import { inheritContext, mergeExtractedActivity } from "@/lib/conversation/context-resolver";
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/** Deep-clone any serialisable value to prevent reference mutation. */
+function deepClone<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+/** Single-line JSON state dump at end of every webhook. */
+function dumpState(label: string, stateStatus: string, ctx: ConversationContext) {
+  console.log(
+    `[STATE_DUMP] ${label} ` +
+    JSON.stringify({
+      status: stateStatus,
+      currentActivity: ctx.currentActivity,
+      pendingQueue: ctx.pendingActivities,
+      completedQueue: ctx.completedActivities,
+    })
+  );
+}
+
+/** Log every state transition with full context. */
+function logTransition(fromState: string, toState: string, ctx: ConversationContext) {
+  const missing = getMissingFields(ctx.currentActivity);
+  console.log(
+    `[TRANSITION] ${fromState} → ${toState} | ` +
+    `activity_type=${ctx.currentActivity?.activity_type ?? "null"} | ` +
+    `pending=${ctx.pendingActivities.length} | ` +
+    `completed=${ctx.completedActivities.length} | ` +
+    `missing=[${missing.join(",")}]`
+  );
+}
+
+/** Check if a duplicate activity exists in the history within the last 5 minutes. */
+function checkDuplicateInHistory(current: any, history: any[]): boolean {
+  if (!current || !current.activity_type) return false;
+  
+  const now = new Date().getTime();
+  const FIVE_MINUTES_MS = 5 * 60 * 1000;
+  
+  for (const h of history) {
+    if (!h.created_at) continue;
+    
+    const createdAtTime = new Date(h.created_at).getTime();
+    if (now - createdAtTime > FIVE_MINUTES_MS) continue;
+    
+    // Compare activity details
+    const typeMatch = h.activity_data?.activity_type === current.activity_type;
+    const farmMatch = h.farm_name === current.farm;
+    const cropMatch = h.crop_name === current.crop;
+    const productMatch = h.activity_data?.product === current.product;
+    const quantityMatch = h.activity_data?.quantity === current.quantity;
+    const dateMatch = h.activity_data?.date === current.date;
+    
+    if (typeMatch && farmMatch && cropMatch && productMatch && quantityMatch && dateMatch) {
+      return true;
+    }
+  }
+  
+  return false;
+}
 
 // Meta Webhook Verification (GET)
 export async function GET(request: NextRequest) {
@@ -158,7 +219,7 @@ export async function POST(request: NextRequest) {
     perf.milestone("Load Conversation");
 
     // 6. Check for Explicit Cancellation Words
-    const isCancel = messageType === "text" &&
+    let isCancel = messageType === "text" &&
       /^\s*(iptal|vazgeçtim|vazgec*tim|boşver|bosver|baştan başlayalım|bastan baslayalim)\s*$/i.test(rawMessageText);
 
     let responderStatus: "idle" | "collecting" | "completed" | "cancelled" = "idle";
@@ -175,6 +236,34 @@ export async function POST(request: NextRequest) {
       history: optimizedHist
     };
 
+    let stateStatus: ConversationStatus = conversation ? conversation.status : "NEW";
+    let bypassAI = false;
+
+    // Check if we are waiting for duplicate confirmation
+    if (ctx && (ctx as any).waitingDuplicateConfirmation) {
+      const lowerMsg = rawMessageText.trim().toLowerCase();
+      const affirmativeWords = ["evet", "kaydet", "onayla", "tekrar", "yes", "olur", "istiyorum", "aynen", "kabul"];
+      const negativeWords = ["hayır", "hayir", "iptal", "vazgeç", "vazgec", "boşver", "bosver", "istemiyorum", "no", "red"];
+      
+      if (affirmativeWords.some(w => lowerMsg.includes(w))) {
+        console.log("[INFO] User confirmed duplicate save.");
+        ctx.currentActivity = (ctx as any).waitingDuplicateConfirmation;
+        (ctx as any).duplicateConfirmed = true;
+        (ctx as any).waitingDuplicateConfirmation = null;
+        stateStatus = "READY_TO_SAVE";
+        bypassAI = true;
+      } else {
+        console.log("[INFO] User did not confirm duplicate save. Clearing duplicate state.");
+        ctx.currentActivity = null;
+        (ctx as any).waitingDuplicateConfirmation = null;
+        (ctx as any).duplicateConfirmed = false;
+        if (negativeWords.some(w => lowerMsg.includes(w))) {
+          isCancel = true;
+          bypassAI = true;
+        }
+      }
+    }
+
     if (isCancel) {
       console.log(`[INFO] Farmer ${from} requested cancellation.`);
       if (conversation) {
@@ -186,34 +275,41 @@ export async function POST(request: NextRequest) {
       responderNextMissingField = null;
       perf.milestone("Cancel Handling");
     } else {
-      console.log(`Extracting entities from message for ${from}...`);
-      const ai = getAIProvider();
+      let extractorResult: any = null;
+      if (bypassAI) {
+        console.log("[INFO] Bypassing AI extraction because user confirmed/canceled duplicate.");
+        extractorResult = { intent: "activity", activities: [] };
+      } else {
+        console.log(`Extracting entities from message for ${from}...`);
+        const ai = getAIProvider();
 
-      let activeSession = undefined;
-      if (ctx.currentActivity && ctx.currentActivity.activity_type && getMissingFields(ctx.currentActivity).length > 0) {
-        activeSession = {
-          activity_type: ctx.currentActivity.activity_type,
-          next_missing_field: getMissingFields(ctx.currentActivity)[0],
-          pending_data: ctx.currentActivity
-        };
+        let activeSession = undefined;
+        if (ctx.currentActivity && ctx.currentActivity.activity_type && getMissingFields(ctx.currentActivity).length > 0) {
+          activeSession = {
+            activity_type: ctx.currentActivity.activity_type,
+            next_missing_field: getMissingFields(ctx.currentActivity)[0],
+            pending_data: ctx.currentActivity
+          };
+        }
+
+        const rawExtractorResult = await ai.extract({
+          message: rawMessageText,
+          farmerStatus: optimizedStatus,
+          history: optimizedHist,
+          audioData,
+          activeSession
+        });
+        extractorResult = rawExtractorResult;
       }
-
-      const extractorResult: any = await ai.extract({
-        message: rawMessageText,
-        farmerStatus: optimizedStatus,
-        history: optimizedHist,
-        audioData,
-        activeSession
-      });
       console.log("Extractor Result:", JSON.stringify(extractorResult, null, 2));
       perf.milestone("Extractor");
 
       ctx.extractedEntities = extractorResult;
 
-      let stateStatus: ConversationStatus = conversation ? conversation.status : "NEW";
-
-      if (stateStatus === "NEW" || extractorResult.intent === "activity" || stateStatus === "WAITING_REQUIRED_FIELDS") {
-        stateStatus = "EXTRACTING";
+      if (!bypassAI) {
+        if (stateStatus === "NEW" || extractorResult.intent === "activity" || stateStatus === "WAITING_REQUIRED_FIELDS") {
+          stateStatus = "EXTRACTING";
+        }
       }
 
       if (stateStatus !== "EXTRACTING" && (extractorResult.intent === "question" || extractorResult.intent === "unknown")) {
@@ -222,6 +318,7 @@ export async function POST(request: NextRequest) {
       } else {
         responderIntent = "activity";
         let runLoop = true;
+        let prevState: string = stateStatus;
         
         while(runLoop) {
           console.log(`[STATE MACHINE] Current State: ${stateStatus}`);
@@ -232,21 +329,23 @@ export async function POST(request: NextRequest) {
                    const extracted = extractorResult.activities[0];
                    mergeExtractedActivity(ctx.currentActivity, extracted, ctx, farmerStatus);
                    for (let i = 1; i < extractorResult.activities.length; i++) {
-                     ctx.pendingActivities.push(extractorResult.activities[i]);
+                     ctx.pendingActivities.push(deepClone(extractorResult.activities[i]));
                    }
                 } else {
                    for (const act of extractorResult.activities) {
-                     ctx.pendingActivities.push(act);
+                     ctx.pendingActivities.push(deepClone(act));
                    }
                 }
               }
+              logTransition(prevState, "NEXT_ACTIVITY", ctx);
+              prevState = "EXTRACTING";
               stateStatus = "NEXT_ACTIVITY";
               break;
 
             case "NEXT_ACTIVITY":
               if (!ctx.currentActivity) {
                 if (ctx.pendingActivities.length > 0) {
-                  const rawAct = ctx.pendingActivities.shift();
+                  const rawAct = deepClone(ctx.pendingActivities.shift());
                   ctx.currentActivity = {
                      activity_type: null,
                      farm: null,
@@ -258,11 +357,17 @@ export async function POST(request: NextRequest) {
                      crop_id: null
                   };
                   mergeExtractedActivity(ctx.currentActivity, rawAct, ctx, farmerStatus);
+                  logTransition(prevState, "MERGING", ctx);
+                  prevState = "NEXT_ACTIVITY";
                   stateStatus = "MERGING";
                 } else {
+                  logTransition(prevState, "FINISHED", ctx);
+                  prevState = "NEXT_ACTIVITY";
                   stateStatus = "FINISHED";
                 }
               } else {
+                 logTransition(prevState, "MERGING", ctx);
+                 prevState = "NEXT_ACTIVITY";
                  stateStatus = "MERGING";
               }
               break;
@@ -271,27 +376,33 @@ export async function POST(request: NextRequest) {
               if (ctx.currentActivity) {
                 inheritContext(ctx.currentActivity, ctx);
               }
+              logTransition(prevState, "WAITING_REQUIRED_FIELDS", ctx);
+              prevState = "MERGING";
               stateStatus = "WAITING_REQUIRED_FIELDS";
               break;
 
-            case "WAITING_REQUIRED_FIELDS":
+            case "WAITING_REQUIRED_FIELDS": {
               const missing = getMissingFields(ctx.currentActivity);
               
-              console.log("[STATE] Waiting for Required Fields");
-              console.log(`[STATE] Current Activity: \n${JSON.stringify(ctx.currentActivity, null, 2)}`);
-              console.log(`[STATE] Missing Fields: ${JSON.stringify(missing)}`);
+              console.log("[STATE] WAITING_REQUIRED_FIELDS check");
+              console.log(`[STATE] currentActivity: ${JSON.stringify(ctx.currentActivity)}`);
+              console.log(`[STATE] missingFields: ${JSON.stringify(missing)}`);
               
               if (missing.length > 0) {
                  responderStatus = "collecting";
-                 responderPendingData = ctx.currentActivity;
+                 responderPendingData = deepClone(ctx.currentActivity);
                  responderNextMissingField = missing[0];
-                 runLoop = false; // WAIT FOR USER
+                 logTransition(prevState, "WAITING_REQUIRED_FIELDS [paused]", ctx);
+                 runLoop = false;
               } else {
+                 logTransition(prevState, "READY_TO_SAVE", ctx);
+                 prevState = "WAITING_REQUIRED_FIELDS";
                  stateStatus = "READY_TO_SAVE";
               }
               break;
+            }
 
-            case "READY_TO_SAVE":
+            case "READY_TO_SAVE": {
               if (ctx.currentActivity) {
                 if (!ctx.currentActivity.date) {
                   const trDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
@@ -301,25 +412,45 @@ export async function POST(request: NextRequest) {
                 // FINAL STRICT VALIDATION
                 const finalMissing = getMissingFields(ctx.currentActivity);
                 if (finalMissing.length > 0) {
-                   console.warn("[WARNING] Activity reached READY_TO_SAVE but is missing required fields. Bouncing back to WAITING_REQUIRED_FIELDS.", finalMissing);
+                   console.warn("[WARNING] READY_TO_SAVE guard: still missing required fields:", finalMissing);
+                   logTransition(prevState, "WAITING_REQUIRED_FIELDS [bounced]", ctx);
                    stateStatus = "WAITING_REQUIRED_FIELDS";
                    break;
                 }
+
+                // Sprint 2 Duplicate Check within 5 minutes
+                if (!(ctx as any).duplicateConfirmed) {
+                  const isDuplicate = checkDuplicateInHistory(ctx.currentActivity, history);
+                  if (isDuplicate) {
+                    console.log("[WARNING] Duplicate activity detected within 5 minutes. Asking for confirmation.");
+                    (ctx as any).waitingDuplicateConfirmation = deepClone(ctx.currentActivity);
+                    responderStatus = "collecting";
+                    responderPendingData = deepClone(ctx.currentActivity);
+                    responderNextMissingField = "duplicate_confirmation";
+                    logTransition(prevState, "WAITING_REQUIRED_FIELDS [duplicate check paused]", ctx);
+                    stateStatus = "WAITING_REQUIRED_FIELDS";
+                    runLoop = false;
+                    break;
+                  }
+                }
               }
-              
+              logTransition(prevState, "SAVED", ctx);
+              prevState = "READY_TO_SAVE";
               stateStatus = "SAVED";
               break;
+            }
 
-            case "SAVED":
+            case "SAVED": {
               if (!ctx.currentActivity) {
                 stateStatus = "NEXT_ACTIVITY";
                 break;
               }
               
-              console.log(`[INFO] Activity complete. Logging activity for ${from}...`);
+              const activitySnapshot = deepClone(ctx.currentActivity);
+              console.log(`[INFO] SAVED — snapshotted activity: ${JSON.stringify(activitySnapshot)}`);
               
               // Duplication Check
-              const actKey = `${ctx.currentActivity.activity_type}-${ctx.currentActivity.farm}-${ctx.currentActivity.date}-${messageId}`;
+              const actKey = `${activitySnapshot.activity_type}-${activitySnapshot.farm}-${activitySnapshot.date}-${messageId}`;
               if ((ctx as any)._last_saved_key === actKey) {
                  console.log("[INFO] Skipping duplicate save within same session.");
                  stateStatus = "NEXT_ACTIVITY";
@@ -328,17 +459,17 @@ export async function POST(request: NextRequest) {
               
               const { data: logResult, error: logError } = await supabase.rpc("log_farmer_activity", {
                 p_phone: from,
-                p_farm_name: ctx.currentActivity.farm,
-                p_crop_name: ctx.currentActivity.crop,
+                p_farm_name: activitySnapshot.farm,
+                p_crop_name: activitySnapshot.crop,
                 p_activity_data: {
-                  activity_type: ctx.currentActivity.activity_type,
-                  product: ctx.currentActivity.product,
-                  quantity: ctx.currentActivity.quantity,
-                  farm_name: ctx.currentActivity.farm,
-                  farm_id: ctx.currentActivity.farm_id,
-                  crop_name: ctx.currentActivity.crop,
-                  crop_id: ctx.currentActivity.crop_id,
-                  date: ctx.currentActivity.date,
+                  activity_type: activitySnapshot.activity_type,
+                  product: activitySnapshot.product,
+                  quantity: activitySnapshot.quantity,
+                  farm_name: activitySnapshot.farm,
+                  farm_id: activitySnapshot.farm_id,
+                  crop_name: activitySnapshot.crop,
+                  crop_id: activitySnapshot.crop_id,
+                  date: activitySnapshot.date,
                   message_id: messageId
                 }
               });
@@ -350,16 +481,23 @@ export async function POST(request: NextRequest) {
                 (ctx as any)._last_saved_key = actKey;
               }
               
-              ctx.completedActivities.push({ ...ctx.currentActivity });
+              ctx.completedActivities.push(activitySnapshot);
               ctx.currentActivity = null;
+              (ctx as any).duplicateConfirmed = false; // Reset duplicate flag
               
+              logTransition(prevState, "NEXT_ACTIVITY [after save]", ctx);
+              prevState = "SAVED";
               stateStatus = "NEXT_ACTIVITY";
               break;
+            }
 
             case "FINISHED":
               responderStatus = "completed";
-              responderPendingData = ctx.completedActivities.length > 0 ? ctx.completedActivities[ctx.completedActivities.length - 1] : null;
+              responderPendingData = ctx.completedActivities.length > 0
+                ? deepClone(ctx.completedActivities[ctx.completedActivities.length - 1])
+                : null;
               responderNextMissingField = null;
+              logTransition(prevState, "FINISHED [loop end]", ctx);
               runLoop = false;
               break;
           }
