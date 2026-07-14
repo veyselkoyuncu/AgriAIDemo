@@ -63,6 +63,38 @@ export const ACTIVITY_RULES: Record<string, ActivityRule> = {
   }
 };
 
+export function normalizeEntityName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  return name.trim().toLocaleLowerCase('tr-TR').normalize("NFC");
+}
+
+export function normalizeActivityType(rawType: string | null | undefined): string | null {
+  if (!rawType) return null;
+  const normalized = rawType.trim().toLowerCase();
+  
+  const aliases: Record<string, string> = {
+    "spray": "spraying",
+    "pesticide": "spraying",
+    "pesticide_application": "spraying",
+    "ilaclama": "spraying",
+    "ilaçlama": "spraying",
+    "fertilize": "fertilization",
+    "fertilizing": "fertilization",
+    "gubreleme": "fertilization",
+    "gübreleme": "fertilization",
+    "water": "irrigation",
+    "watering": "irrigation",
+    "sulama": "irrigation",
+    "harvest": "harvesting",
+    "hasat": "harvesting",
+    "plant": "planting",
+    "ekim": "planting",
+    "dikim": "planting"
+  };
+
+  return aliases[normalized] || normalized;
+}
+
 export function getMissingFields(activity: any): string[] {
   if (!activity || !activity.activity_type) return ["activity_type"];
   

@@ -6,7 +6,7 @@ import { sendWhatsAppMessage, downloadWhatsAppMedia } from "@/lib/whatsapp";
 import { PerformanceTracker } from "@/lib/utils/perf";
 import { optimizeFarmerStatus, optimizeHistory } from "@/lib/ai/payload-optimizer";
 import { getMissingFields } from "@/lib/conversation/activity-rules";
-import { resolveContext, inheritContext } from "@/lib/conversation/context-resolver";
+import { resolveContext, inheritContext, mergeExtractedActivity } from "@/lib/conversation/context-resolver";
 
 // Meta Webhook Verification (GET)
 export async function GET(request: NextRequest) {
@@ -190,7 +190,7 @@ export async function POST(request: NextRequest) {
       const ai = getAIProvider();
 
       let activeSession = undefined;
-      if (ctx.currentActivity && getMissingFields(ctx.currentActivity).length > 0) {
+      if (ctx.currentActivity && ctx.currentActivity.activity_type && getMissingFields(ctx.currentActivity).length > 0) {
         activeSession = {
           activity_type: ctx.currentActivity.activity_type,
           next_missing_field: getMissingFields(ctx.currentActivity)[0],
@@ -230,13 +230,7 @@ export async function POST(request: NextRequest) {
               if (extractorResult.activities && extractorResult.activities.length > 0) {
                 if (ctx.currentActivity) {
                    const extracted = extractorResult.activities[0];
-                   const fields = ["activity_type", "farm", "crop", "product", "quantity", "date"] as const;
-                   for (const field of fields) {
-                     const entity = extracted[field];
-                     if (entity && entity.value && entity.confidence >= 0.7) {
-                       ctx.currentActivity[field] = resolveContext(entity.value as string, field as any, ctx);
-                     }
-                   }
+                   mergeExtractedActivity(ctx.currentActivity, extracted, ctx, farmerStatus);
                    for (let i = 1; i < extractorResult.activities.length; i++) {
                      ctx.pendingActivities.push(extractorResult.activities[i]);
                    }
@@ -254,13 +248,16 @@ export async function POST(request: NextRequest) {
                 if (ctx.pendingActivities.length > 0) {
                   const rawAct = ctx.pendingActivities.shift();
                   ctx.currentActivity = {
-                     activity_type: rawAct.activity_type?.value || null,
-                     farm: resolveContext(rawAct.farm?.value, "farm", ctx),
-                     crop: resolveContext(rawAct.crop?.value, "crop", ctx),
-                     product: rawAct.product?.value || null,
-                     quantity: rawAct.quantity?.value || null,
-                     date: resolveContext(rawAct.date?.value, "date", ctx)
+                     activity_type: null,
+                     farm: null,
+                     crop: null,
+                     product: null,
+                     quantity: null,
+                     date: null,
+                     farm_id: null,
+                     crop_id: null
                   };
+                  mergeExtractedActivity(ctx.currentActivity, rawAct, ctx, farmerStatus);
                   stateStatus = "MERGING";
                 } else {
                   stateStatus = "FINISHED";
@@ -271,12 +268,19 @@ export async function POST(request: NextRequest) {
               break;
 
             case "MERGING":
-              inheritContext(ctx.currentActivity, ctx);
+              if (ctx.currentActivity) {
+                inheritContext(ctx.currentActivity, ctx);
+              }
               stateStatus = "WAITING_REQUIRED_FIELDS";
               break;
 
             case "WAITING_REQUIRED_FIELDS":
               const missing = getMissingFields(ctx.currentActivity);
+              
+              console.log("[STATE] Waiting for Required Fields");
+              console.log(`[STATE] Current Activity: \n${JSON.stringify(ctx.currentActivity, null, 2)}`);
+              console.log(`[STATE] Missing Fields: ${JSON.stringify(missing)}`);
+              
               if (missing.length > 0) {
                  responderStatus = "collecting";
                  responderPendingData = ctx.currentActivity;
@@ -288,15 +292,40 @@ export async function POST(request: NextRequest) {
               break;
 
             case "READY_TO_SAVE":
-              if (!ctx.currentActivity.date) {
-                const trDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
-                ctx.currentActivity.date = `${trDate.getFullYear()}-${String(trDate.getMonth() + 1).padStart(2, '0')}-${String(trDate.getDate()).padStart(2, '0')}`;
+              if (ctx.currentActivity) {
+                if (!ctx.currentActivity.date) {
+                  const trDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Istanbul" }));
+                  ctx.currentActivity.date = `${trDate.getFullYear()}-${String(trDate.getMonth() + 1).padStart(2, '0')}-${String(trDate.getDate()).padStart(2, '0')}`;
+                }
+                
+                // FINAL STRICT VALIDATION
+                const finalMissing = getMissingFields(ctx.currentActivity);
+                if (finalMissing.length > 0) {
+                   console.warn("[WARNING] Activity reached READY_TO_SAVE but is missing required fields. Bouncing back to WAITING_REQUIRED_FIELDS.", finalMissing);
+                   stateStatus = "WAITING_REQUIRED_FIELDS";
+                   break;
+                }
               }
+              
               stateStatus = "SAVED";
               break;
 
             case "SAVED":
+              if (!ctx.currentActivity) {
+                stateStatus = "NEXT_ACTIVITY";
+                break;
+              }
+              
               console.log(`[INFO] Activity complete. Logging activity for ${from}...`);
+              
+              // Duplication Check
+              const actKey = `${ctx.currentActivity.activity_type}-${ctx.currentActivity.farm}-${ctx.currentActivity.date}-${messageId}`;
+              if ((ctx as any)._last_saved_key === actKey) {
+                 console.log("[INFO] Skipping duplicate save within same session.");
+                 stateStatus = "NEXT_ACTIVITY";
+                 break;
+              }
+              
               const { data: logResult, error: logError } = await supabase.rpc("log_farmer_activity", {
                 p_phone: from,
                 p_farm_name: ctx.currentActivity.farm,
@@ -306,8 +335,11 @@ export async function POST(request: NextRequest) {
                   product: ctx.currentActivity.product,
                   quantity: ctx.currentActivity.quantity,
                   farm_name: ctx.currentActivity.farm,
+                  farm_id: ctx.currentActivity.farm_id,
                   crop_name: ctx.currentActivity.crop,
-                  date: ctx.currentActivity.date
+                  crop_id: ctx.currentActivity.crop_id,
+                  date: ctx.currentActivity.date,
+                  message_id: messageId
                 }
               });
 
@@ -315,6 +347,7 @@ export async function POST(request: NextRequest) {
                 console.error("Supabase error saving activity via RPC:", logError);
               } else {
                 console.log("Successfully saved activity:", logResult);
+                (ctx as any)._last_saved_key = actKey;
               }
               
               ctx.completedActivities.push({ ...ctx.currentActivity });
@@ -331,8 +364,7 @@ export async function POST(request: NextRequest) {
               break;
           }
         }
-      }
-
+        
       if (stateStatus === "FINISHED") {
          if (conversation) {
             await deleteConversation(from);
@@ -343,6 +375,7 @@ export async function POST(request: NextRequest) {
          } else {
             await createConversation(from, responderIntent, stateStatus, ctx);
          }
+      }
       }
       perf.milestone("State Machine & Flow");
     }
@@ -364,14 +397,14 @@ export async function POST(request: NextRequest) {
 
     // 10. Save message log to DB
     const savedMessageText = rawMessageText || "[Ses Mesajı: Gemini tarafından çözümlendi]";
-    const { error: msgInsertError } = await supabase.from("messages").insert({
+    const { error: msgInsertError } = await supabase.from("messages").upsert({
       message_id: messageId,
       phone: from,
       raw_message: savedMessageText,
       intent: responderIntent,
       extracted_data: responderPendingData,
       reply_message: replyMessage,
-    });
+    }, { onConflict: 'message_id', ignoreDuplicates: true });
 
     if (msgInsertError) {
       console.error("Error inserting message log:", msgInsertError);
