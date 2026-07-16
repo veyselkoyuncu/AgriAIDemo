@@ -333,3 +333,37 @@ begin
     create index if not exists idx_messages_message_id on public.messages(message_id);
   end if;
 end $$;
+
+-- ==========================================
+-- 13. Sprint 2.5.1: Message Inbox
+-- ==========================================
+-- Incoming WhatsApp messages are stored here first.
+-- The worker picks up batches of unprocessed messages and
+-- processes them together for natural conversation flow.
+
+create table if not exists public.incoming_messages (
+  id uuid default gen_random_uuid() primary key,
+  wamid text not null unique,
+  phone text not null,
+  text text not null default '',
+  message_type text not null default 'text',
+  audio_data jsonb,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  processed boolean default false,
+  processed_at timestamp with time zone
+);
+
+alter table public.incoming_messages enable row level security;
+
+create policy "Allow all to incoming_messages"
+on public.incoming_messages
+for all
+using (true)
+with check (true);
+
+-- Index for fast pending message lookups per user
+create index if not exists idx_incoming_messages_phone_processed
+on public.incoming_messages(phone, processed);
+
+create index if not exists idx_incoming_messages_wamid
+on public.incoming_messages(wamid);
