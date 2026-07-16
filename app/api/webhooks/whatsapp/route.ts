@@ -134,7 +134,7 @@ async function conversationWorker(
   const requestId = generateRequestId();
 
   // Combine all text messages, separated by newlines
-  const combinedText = pendingMessages
+  let combinedText = pendingMessages
     .map(m => m.text)
     .filter(Boolean)
     .join("\n");
@@ -295,14 +295,13 @@ async function conversationWorker(
 
   // ─── 8. AI Extraction ──────────────────────────────────────────────────
   let extractorResult: any = null;
+  let activeSession: any = undefined;
   if (bypassAI) {
     console.log("[INFO] Bypassing AI extraction because user confirmed/canceled duplicate.");
     extractorResult = { intent: "activity", activities: [] };
   } else {
     console.log(`Extracting entities from combined message for ${phone}...`);
     const ai = getAIProvider();
-
-    let activeSession = undefined;
     if (
       ctx.currentActivity &&
       ctx.currentActivity.activity_type &&
@@ -311,7 +310,7 @@ async function conversationWorker(
       activeSession = {
         activity_type: ctx.currentActivity.activity_type,
         next_missing_field: getMissingFields(ctx.currentActivity)[0],
-        pending_data: ctx.currentActivity,
+        pending_data: deepClone(ctx.currentActivity),
       };
     }
 
@@ -415,6 +414,55 @@ async function conversationWorker(
             responderNextMissingField = missing[0];
             markPendingActivityStart(ctx);
             logTransition(prevState, "WAITING_REQUIRED_FIELDS [paused]", ctx);
+
+            // ─── Sprint 2.5.1: Queue Flush Before Yielding ─────────────────
+            const flushCheckStart = pendingMessages[pendingMessages.length - 1]?.created_at ?? new Date(0).toISOString();
+            const hasNew = await hasNewMessagesSince(phone, flushCheckStart);
+
+            if (hasNew) {
+              console.log("[FLUSH] New messages arrived during processing. Rebuilding extraction...");
+              const moreMessages = await getPendingMessages(phone);
+              if (moreMessages.length > 0) {
+                const extraText = moreMessages.map(m => m.text).filter(Boolean).join("\n");
+                combinedText = combinedText + "\n" + extraText;
+                pendingMessages.push(...moreMessages); // Update checkpoint for subsequent flushes
+
+                console.log(`[FLUSH] Merged ${moreMessages.length} new message(s). Full combined text:\n${combinedText}`);
+
+                const moreIds = moreMessages.map(m => m.id);
+                const moreWamids = moreMessages.map(m => m.wamid);
+                await markMessagesProcessed(moreIds);
+                for (const w of moreWamids) await markMessageProcessed(w);
+
+                const ai2 = getAIProvider();
+                const rawResult2 = await ai2.extract({
+                  message: combinedText,
+                  farmerStatus: optimizedStatus,
+                  history: optimizedHist,
+                  audioData,
+                  activeSession: activeSession ? deepClone(activeSession) : undefined,
+                });
+
+                console.log("[FLUSH] Re-extraction result:", JSON.stringify(rawResult2, null, 2));
+
+                extractorResult = rawResult2;
+                ctx.extractedEntities = extractorResult;
+
+                if (extractorResult.activities && extractorResult.activities.length > 0) {
+                  ctx.pendingActivities = [];
+                  for (const act of extractorResult.activities) {
+                    ctx.pendingActivities.push(deepClone(act));
+                  }
+                  
+                  ctx.currentActivity = null;
+                  logTransition(prevState, "NEXT_ACTIVITY [flush restart]", ctx);
+                  prevState = "WAITING_REQUIRED_FIELDS";
+                  stateStatus = "NEXT_ACTIVITY";
+                  break; // Break the switch to let the while(runLoop) continue processing the fresh extraction
+                }
+              }
+            }
+
             runLoop = false;
           } else {
             logTransition(prevState, "READY_TO_SAVE", ctx);
@@ -526,20 +574,22 @@ async function conversationWorker(
       }
     }
 
-    // Persist conversation state
-    if (stateStatus === "FINISHED") {
-      if (conversation) await deleteConversation(phone);
+  }
+  
+  // ─── 10. Persist conversation state ──────────────────────────────────────
+  if (stateStatus === "FINISHED") {
+    if (conversation) await deleteConversation(phone);
+  } else {
+    if (conversation) {
+      await updateConversation(phone, { intent: responderIntent, status: stateStatus, state_data: ctx });
     } else {
-      if (conversation) {
-        await updateConversation(phone, { intent: responderIntent, status: stateStatus, state_data: ctx });
-      } else {
-        await createConversation(phone, responderIntent, stateStatus, ctx);
-      }
+      await createConversation(phone, responderIntent, stateStatus, ctx);
     }
   }
+
   perf.milestone("State Machine & Flow");
 
-  // ─── 10. Sprint 2.5.1: Smart Response Suppression ─────────────────────
+  // ─── 11. Sprint 2.5.1: Smart Response Suppression ─────────────────────
   // If conversation became complete, skip follow-up questions.
   // If COLLECTING but all fields are already filled → treat as completed.
   if (responderStatus === "collecting" && ctx.currentActivity) {
@@ -550,81 +600,6 @@ async function conversationWorker(
       responderPendingData = deepClone(ctx.currentActivity);
       responderNextMissingField = null;
     }
-  }
-
-  // ─── 11. Sprint 2.5.1: Queue Flush Before Responding ─────────────────
-  // Check if new messages arrived while we were processing.
-  // If so, reload them, rebuild the full combined text, re-extract from
-  // scratch (no activeSession), and re-enter the state machine pipeline
-  // so the new extraction completely replaces the old one.
-  const flushCheckStart = pendingMessages[pendingMessages.length - 1]?.created_at ?? new Date(0).toISOString();
-  let hasNew = await hasNewMessagesSince(phone, flushCheckStart);
-
-  // Loop to handle multiple flushes (messages may keep arriving)
-  while (hasNew && (responderStatus === "collecting" || stateStatus === "WAITING_REQUIRED_FIELDS")) {
-    console.log("[FLUSH] New messages arrived during processing. Rebuilding extraction...");
-
-    const moreMessages = await getPendingMessages(phone);
-    if (moreMessages.length === 0) break;
-
-    const extraText = moreMessages.map(m => m.text).filter(Boolean).join("\n");
-    const fullCombinedText = combinedText + "\n" + extraText;
-
-    console.log(`[FLUSH] Merged ${moreMessages.length} new message(s). Full combined text:\n${fullCombinedText}`);
-
-    const moreIds = moreMessages.map(m => m.id);
-    const moreWamids = moreMessages.map(m => m.wamid);
-    await markMessagesProcessed(moreIds);
-    for (const w of moreWamids) await markMessageProcessed(w);
-
-    // ── Full re-extraction WITHOUT activeSession ─────────────────────────
-    // We want the AI to see the complete picture, not just the missing field.
-    const ai2 = getAIProvider();
-    const rawResult2 = await ai2.extract({
-      message: fullCombinedText,
-      farmerStatus: optimizedStatus,
-      history: optimizedHist,
-      audioData,
-      // NO activeSession — full extraction from scratch
-    });
-
-    console.log("[FLUSH] Re-extraction result:", JSON.stringify(rawResult2, null, 2));
-
-    // ── Replace extraction result and re-enter state machine ─────────────
-    extractorResult = rawResult2;
-    ctx.extractedEntities = extractorResult;
-
-    // Reset the current activity and re-run the state machine pipeline
-    // so the new extraction completely replaces the old partial one.
-    if (extractorResult.activities && extractorResult.activities.length > 0) {
-      // Clear the pending queue (stale from old extraction)
-      ctx.pendingActivities = [];
-      // Push all extracted activities (may include the previously partial one now complete)
-      for (const act of extractorResult.activities) {
-        ctx.pendingActivities.push(deepClone(act));
-      }
-      // Reset current activity so NEXT_ACTIVITY picks up the first one fresh
-      ctx.currentActivity = null;
-      stateStatus = "NEXT_ACTIVITY";
-    }
-
-    // Re-check: did this flush complete the conversation?
-    if (ctx.currentActivity) {
-      const stillMissing = getMissingFields(ctx.currentActivity);
-      if (stillMissing.length === 0) {
-        console.log("[FLUSH] Conversation became complete after re-extraction.");
-        responderStatus = "completed";
-        responderPendingData = deepClone(ctx.currentActivity);
-        responderNextMissingField = null;
-      } else {
-        responderNextMissingField = stillMissing[0];
-        responderStatus = "collecting";
-      }
-    }
-
-    // Check for even more messages before we finally respond
-    const newCheckpoint = moreMessages[moreMessages.length - 1]?.created_at ?? flushCheckStart;
-    hasNew = await hasNewMessagesSince(phone, newCheckpoint);
   }
 
   // ─── 12. Finalize & Respond ────────────────────────────────────────────
