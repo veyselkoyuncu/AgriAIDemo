@@ -295,3 +295,41 @@ on public.conversation_state
 for all
 using (true)
 with check (true);
+
+-- ==========================================
+-- 11. Sprint 2.5: Processed Messages (Idempotency)
+-- ==========================================
+
+create table if not exists public.processed_messages (
+  id uuid default gen_random_uuid() primary key,
+  message_id text not null unique,
+  processed_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+alter table public.processed_messages enable row level security;
+
+create policy "Allow all to processed_messages"
+on public.processed_messages
+for all
+using (true)
+with check (true);
+
+-- Index for fast lookups by message_id
+create index if not exists idx_processed_messages_message_id
+on public.processed_messages(message_id);
+
+-- ==========================================
+-- 12. Sprint 2.5: Add message_id to messages table
+-- ==========================================
+
+-- Add message_id column if it doesn't exist (for dedup)
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_name = 'messages' and column_name = 'message_id'
+  ) then
+    alter table public.messages add column message_id text;
+    create index if not exists idx_messages_message_id on public.messages(message_id);
+  end if;
+end $$;

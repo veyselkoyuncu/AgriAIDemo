@@ -1,8 +1,42 @@
-import { AIProvider, ExtractorRequest, ExtractorResponse, ResponderRequest, ProviderError } from "./types";
+import { AIProvider, ExtractorRequest, ExtractorResponse, ResponderRequest, ProviderError, EXTRACTION_TIMEOUT_MS, RESPONDER_TIMEOUT_MS, DEFAULT_COOLDOWN_SECONDS } from "./types";
 import { GeminiProvider } from "./providers/gemini";
 import { DeepSeekProvider } from "./providers/deepseek";
 import { AIProviderHealthRegistry } from "./provider-health";
 import { validateExtractorResponse } from "./output-validator";
+
+/**
+ * Sprint 2.5: Timeout-aware wrapper. Wraps a promise with an AbortController
+ * timeout. On timeout, throws a ProviderError so the failover chain can react.
+ */
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  providerName: string,
+  operation: "extract" | "respond"
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  // Race the original promise against a timeout
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    controller.signal.addEventListener("abort", () => {
+      reject(
+        new ProviderError(
+          `[TIMEOUT] ${providerName} ${operation} timed out after ${timeoutMs}ms`,
+          408,
+          DEFAULT_COOLDOWN_SECONDS
+        )
+      );
+    }, { once: true });
+  });
+
+  try {
+    const result = await Promise.race([promise, timeoutPromise]);
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 class FailoverAIProvider implements AIProvider {
   private providers: AIProvider[];
@@ -31,7 +65,12 @@ class FailoverAIProvider implements AIProvider {
       const start = Date.now();
       try {
         console.log(`[AI Failover] Attempting extract with: ${provider.name}`);
-        const rawResult = await provider.extract(request);
+        const rawResult = await withTimeout(
+          provider.extract(request),
+          EXTRACTION_TIMEOUT_MS,
+          provider.name,
+          "extract"
+        );
         // Sprint 2 Item 7: Validate AI output structure before using
         const result = validateExtractorResponse(rawResult);
         const duration = ((Date.now() - start) / 1000).toFixed(1);
@@ -42,13 +81,13 @@ class FailoverAIProvider implements AIProvider {
         console.warn(`[AI Log] AI Provider: ${provider.name} | Extractor | duration: ${duration}s | status: error | error: ${err.message || err}`);
         lastError = err;
 
-        // Mark provider as unhealthy if it is a ProviderError with status 429 or 5xx
-        if (err instanceof ProviderError && (err.statusCode === 429 || err.statusCode >= 500)) {
-          const cooldown = err.retryAfterSeconds || 60;
+        // Mark provider as unhealthy if it is a ProviderError with status 429 or 5xx or timeout (408)
+        if (err instanceof ProviderError) {
+          const cooldown = err.retryAfterSeconds || DEFAULT_COOLDOWN_SECONDS;
           AIProviderHealthRegistry.markUnhealthy(provider.name, cooldown, err.message);
-        } else if (!(err instanceof ProviderError)) {
-          // If it's a generic error (e.g. fetch network failure / timeout), apply a default cooldown
-          AIProviderHealthRegistry.markUnhealthy(provider.name, 30, err.message || "Network Error");
+        } else {
+          // If it's a generic error (e.g. fetch network failure), apply a default cooldown
+          AIProviderHealthRegistry.markUnhealthy(provider.name, DEFAULT_COOLDOWN_SECONDS, err.message || "Network Error");
         }
         
         // Log transition to next provider if available
@@ -77,7 +116,12 @@ class FailoverAIProvider implements AIProvider {
       const start = Date.now();
       try {
         console.log(`[AI Failover] Attempting respond with: ${provider.name}`);
-        const result = await provider.respond(request);
+        const result = await withTimeout(
+          provider.respond(request),
+          RESPONDER_TIMEOUT_MS,
+          provider.name,
+          "respond"
+        );
         const duration = ((Date.now() - start) / 1000).toFixed(1);
         console.log(`[AI Log] AI Provider: ${provider.name} | Responder | duration: ${duration}s | status: success`);
         return result;
@@ -86,13 +130,12 @@ class FailoverAIProvider implements AIProvider {
         console.warn(`[AI Log] AI Provider: ${provider.name} | Responder | duration: ${duration}s | status: error | error: ${err.message || err}`);
         lastError = err;
 
-        // Mark provider as unhealthy if it is a ProviderError with status 429 or 5xx
-        if (err instanceof ProviderError && (err.statusCode === 429 || err.statusCode >= 500)) {
-          const cooldown = err.retryAfterSeconds || 60;
+        // Mark provider as unhealthy
+        if (err instanceof ProviderError) {
+          const cooldown = err.retryAfterSeconds || DEFAULT_COOLDOWN_SECONDS;
           AIProviderHealthRegistry.markUnhealthy(provider.name, cooldown, err.message);
-        } else if (!(err instanceof ProviderError)) {
-          // If it's a generic error (e.g. fetch network failure / timeout), apply a default cooldown
-          AIProviderHealthRegistry.markUnhealthy(provider.name, 30, err.message || "Network Error");
+        } else {
+          AIProviderHealthRegistry.markUnhealthy(provider.name, DEFAULT_COOLDOWN_SECONDS, err.message || "Network Error");
         }
 
         // Log transition to next provider if available

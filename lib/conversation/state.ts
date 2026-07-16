@@ -30,6 +30,10 @@ export interface ConversationContext {
   resolvedContext: any;
   extractedEntities: ExtractorResponse | null;
   history: any[];
+  // Sprint 2.5: Conversation version for stale AI response detection
+  conversationVersion?: number;
+  // Sprint 2.5: Timestamp when the pending activity was last updated
+  pendingActivitySince?: string;
 }
 
 export interface ConversationState {
@@ -186,4 +190,44 @@ export function isConversationExpired(
   const diffInMinutes = (now - lastMessageTime) / (1000 * 60);
   
   return diffInMinutes > timeoutInMinutes;
+}
+
+// ─── Sprint 2.5: Pending Activity Expiration ────────────────────────────────
+
+const PENDING_ACTIVITY_TIMEOUT_MINUTES = 10;
+
+/**
+ * Check whether the pending activity should be expired.
+ * If a pending activity has been inactive for more than the configurable
+ * timeout, it should be discarded to prevent stale resumption.
+ */
+export function isPendingActivityExpired(ctx: ConversationContext): boolean {
+  if (!ctx.currentActivity) return false;
+  if (!ctx.pendingActivitySince) return false;
+
+  const since = new Date(ctx.pendingActivitySince).getTime();
+  const now = Date.now();
+  const diffMinutes = (now - since) / (1000 * 60);
+
+  return diffMinutes > PENDING_ACTIVITY_TIMEOUT_MINUTES;
+}
+
+/**
+ * Bump the conversation version and return the new version.
+ * Each new incoming message increments the version.
+ * This is used for stale AI response detection.
+ */
+export function bumpConversationVersion(ctx: ConversationContext): number {
+  const newVersion = (ctx.conversationVersion ?? 0) + 1;
+  ctx.conversationVersion = newVersion;
+  return newVersion;
+}
+
+/**
+ * Mark the start of a pending activity for expiration tracking.
+ */
+export function markPendingActivityStart(ctx: ConversationContext): void {
+  if (ctx.currentActivity) {
+    ctx.pendingActivitySince = new Date().toISOString();
+  }
 }

@@ -10,6 +10,26 @@ export class ProviderError extends Error {
   }
 }
 
+// ─── Timeout Constants (Sprint 2.5) ──────────────────────────────────────────
+
+/** Maximum time an extraction request may take. */
+export const EXTRACTION_TIMEOUT_MS = 8_000; // 8 seconds
+
+/** Maximum time a responder request may take. */
+export const RESPONDER_TIMEOUT_MS = 8_000; // 8 seconds
+
+/** Hard cap on total webhook processing time. */
+export const MAX_REQUEST_DURATION_MS = 15_000; // 15 seconds
+
+/** Default provider cooldown on generic errors. */
+export const DEFAULT_COOLDOWN_SECONDS = 30;
+
+/** Circuit breaker: minimum time before a provider is retried. */
+export const MIN_COOLDOWN_SECONDS = 10;
+
+/** Circuit breaker: maximum cooldown for repeated failures. */
+export const MAX_COOLDOWN_SECONDS = 300; // 5 minutes
+
 export interface ExtractedEntity<T> {
   value: T;
   confidence: number;
