@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { getConversation, createConversation, updateConversation, deleteConversation, isConversationExpired, ConversationContext, ConversationStatus } from "@/lib/conversation/state";
+import { getConversation, createConversation, updateConversation, deleteConversation, isConversationExpired, isPendingActivityExpired, bumpConversationVersion, markPendingActivityStart, ConversationContext, ConversationStatus } from "@/lib/conversation/state";
 import { getAIProvider } from "@/lib/ai/provider";
 import { sendWhatsAppMessage, downloadWhatsAppMedia } from "@/lib/whatsapp";
 import { PerformanceTracker } from "@/lib/utils/perf";
 import { optimizeFarmerStatus, optimizeHistory } from "@/lib/ai/payload-optimizer";
 import { getMissingFields } from "@/lib/conversation/activity-rules";
 import { inheritContext, mergeExtractedActivity } from "@/lib/conversation/context-resolver";
+import { isMessageProcessed, markMessageProcessed } from "@/lib/conversation/idempotency";
+import { acquireUserLock } from "@/lib/conversation/user-queue";
+import { LifecycleLogger, generateRequestId } from "@/lib/conversation/logging";
+import { MAX_REQUEST_DURATION_MS } from "@/lib/ai/types";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -90,6 +94,13 @@ export async function GET(request: NextRequest) {
 // Meta Webhook Message Processing (POST)
 export async function POST(request: NextRequest) {
   const perf = new PerformanceTracker();
+  const requestStartTime = Date.now();
+
+  // Sprint 2.5: Variables for lifecycle logging (declared early for finally block)
+  let lifecycle: LifecycleLogger | null = null;
+  let releaseLock: (() => void) | null = null;
+  let from = "";
+
   try {
     const body = await request.json();
 
@@ -111,12 +122,27 @@ export async function POST(request: NextRequest) {
     }
 
     // Extract details
-    const from = message.from;
+    from = message.from;
     console.log(`[DEBUG] WhatsApp Webhook - Extracted from: "${from}"`);
     const messageId = message.id;
     const messageType = message.type;
 
-    // 1. Duplicate webhook protection
+    // ─── Sprint 2.5, Item 1: Idempotency Check ────────────────────────────
+    if (await isMessageProcessed(messageId)) {
+      console.log(`[INFO] DUPLICATE_MESSAGE_SKIPPED: ${messageId}`);
+      return NextResponse.json({ status: "duplicate_ignored" });
+    }
+
+    // ─── Sprint 2.5, Item 2: Per-User Processing Queue ────────────────────
+    releaseLock = await acquireUserLock(from);
+
+    // Check total duration hasn't already exceeded limit (unlikely but defensive)
+    if (Date.now() - requestStartTime > MAX_REQUEST_DURATION_MS) {
+      console.warn(`[TIMEOUT] Request exceeded max duration before processing.`);
+      return NextResponse.json({ status: "timeout" });
+    }
+
+    // 1. Duplicate webhook protection (legacy — kept as secondary check, idempotency above is primary)
     const { data: existingMessage } = await supabase
       .from("messages")
       .select("id")
@@ -236,6 +262,24 @@ export async function POST(request: NextRequest) {
       history: optimizedHist
     };
 
+    // ─── Sprint 2.5, Item 3: Conversation Version Bump ──────────────────
+    const currentVersion = bumpConversationVersion(ctx);
+
+    // ─── Sprint 2.5, Item 9: Lifecycle Logging ──────────────────────────
+    const requestId = generateRequestId();
+    lifecycle = new LifecycleLogger(requestId, currentVersion, messageId, from);
+    lifecycle.transition("QUEUED", { QUEUE_STATUS: "active" });
+    lifecycle.transition("STARTED");
+
+    // ─── Sprint 2.5, Item 8: Pending Activity Expiration ────────────────
+    if (isPendingActivityExpired(ctx)) {
+      console.log(`[INFO] Pending activity expired for ${from}. Clearing...`);
+      ctx.currentActivity = null;
+      ctx.pendingActivities = [];
+      ctx.pendingActivitySince = undefined;
+      isCancel = true; // Treat as cancellation to reset state cleanly
+    }
+
     let stateStatus: ConversationStatus = conversation ? conversation.status : "NEW";
     let bypassAI = false;
 
@@ -303,6 +347,7 @@ export async function POST(request: NextRequest) {
       }
       console.log("Extractor Result:", JSON.stringify(extractorResult, null, 2));
       perf.milestone("Extractor");
+      lifecycle!.transition("AI");
 
       ctx.extractedEntities = extractorResult;
 
@@ -376,6 +421,7 @@ export async function POST(request: NextRequest) {
               if (ctx.currentActivity) {
                 inheritContext(ctx.currentActivity, ctx);
               }
+              lifecycle!.transition("MERGE");
               logTransition(prevState, "WAITING_REQUIRED_FIELDS", ctx);
               prevState = "MERGING";
               stateStatus = "WAITING_REQUIRED_FIELDS";
@@ -392,6 +438,8 @@ export async function POST(request: NextRequest) {
                  responderStatus = "collecting";
                  responderPendingData = deepClone(ctx.currentActivity);
                  responderNextMissingField = missing[0];
+                 // Sprint 2.5: Mark pending activity start for expiration tracking
+                 markPendingActivityStart(ctx);
                  logTransition(prevState, "WAITING_REQUIRED_FIELDS [paused]", ctx);
                  runLoop = false;
               } else {
@@ -484,6 +532,8 @@ export async function POST(request: NextRequest) {
               ctx.completedActivities.push(activitySnapshot);
               ctx.currentActivity = null;
               (ctx as any).duplicateConfirmed = false; // Reset duplicate flag
+
+              lifecycle!.transition("SAVE");
               
               logTransition(prevState, "NEXT_ACTIVITY [after save]", ctx);
               prevState = "SAVED";
@@ -520,17 +570,25 @@ export async function POST(request: NextRequest) {
 
     // 9. Generate reply message
     console.log(`Generating responder reply for ${from}...`);
-    const ai = getAIProvider();
-    const replyMessage = await ai.respond({
-      message: rawMessageText || "[Ses Mesajı]",
-      status: responderStatus,
-      intent: responderIntent,
-      pendingData: responderPendingData,
-      nextMissingField: responderNextMissingField,
-      farmerStatus: optimizedStatus,
-      history: optimizedHist
-    });
-    console.log(`Generated reply: "${replyMessage}"`);
+    let replyMessage: string;
+    try {
+      const ai = getAIProvider();
+      replyMessage = await ai.respond({
+        message: rawMessageText || "[Ses Mesajı]",
+        status: responderStatus,
+        intent: responderIntent,
+        pendingData: responderPendingData,
+        nextMissingField: responderNextMissingField,
+        farmerStatus: optimizedStatus,
+        history: optimizedHist
+      });
+      console.log(`Generated reply: "${replyMessage}"`);
+    } catch (responderError: any) {
+      // Sprint 2.5, Item 7: Graceful failure — if responder fails,
+      // still save state and mark message as processed.
+      console.error(`[ERROR] Responder failed for ${from}:`, responderError.message);
+      replyMessage = "Mesajınızı aldık ancak şu anda yanıt oluşturamıyoruz. Lütfen kısa bir süre sonra tekrar deneyin.";
+    }
     perf.milestone("Responder");
 
     // 10. Save message log to DB
@@ -552,6 +610,12 @@ export async function POST(request: NextRequest) {
     await sendWhatsAppMessage(from, replyMessage);
     perf.milestone("WhatsApp API");
 
+    lifecycle!.transition("SEND");
+    lifecycle!.transition("COMPLETED");
+
+    // ─── Sprint 2.5, Item 1: Mark message as processed ──────────────────
+    await markMessageProcessed(messageId);
+
     console.log(perf.getSummary());
 
     return NextResponse.json({
@@ -562,6 +626,16 @@ export async function POST(request: NextRequest) {
 
   } catch (error: any) {
     console.error("Error processing WhatsApp Webhook POST request:", error);
+    // Sprint 2.5, Item 7: Graceful failure — log failure but return 200
+    // to prevent Meta from retrying infinitely.
+    if (lifecycle) {
+      lifecycle.transition("FAILED", { ERROR: error.message || "Unknown error" });
+    }
     return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
+  } finally {
+    // Sprint 2.5, Item 2: Release the per-user lock
+    if (releaseLock) {
+      releaseLock();
+    }
   }
 }

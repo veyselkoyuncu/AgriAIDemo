@@ -978,3 +978,13 @@ When adding new features:
 7. Explain architectural impacts if core behavior changes.
 
 If a requested change conflicts with these principles, preserve the architecture and explain the trade-offs before implementing.
+
+# Not Yet Addressed
+The following areas are intentionally undefined and will be
+formalized when the relevant sprint begins:
+- Multi-tenancy / data isolation model
+- Permission system (family/worker roles)
+- Admin/operations layer
+Do not assume an implementation for these areas.
+If a task touches them, stop and ask for architectural guidance
+instead of inventing a model.
