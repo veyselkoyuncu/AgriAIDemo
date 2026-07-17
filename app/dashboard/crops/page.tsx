@@ -99,7 +99,21 @@ export default function CropsPage() {
         <EmptyState
           icon={Sprout}
           title="Ekili Ürün Bulunamadı"
-          description="Kayıtlı ürününüz bulunmamaktadır. Sağ üstteki butondan ilk ürününüzü tarlanıza ekleyebilirsiniz."
+          description="Henüz kayıtlı bir ürününüz bulunmuyor. Bir tarlanıza ürün ekleyerek tarım faaliyetlerinizi takip etmeye başlayın."
+          action={
+            <button
+              onClick={() => {
+                if (farms.length === 0) {
+                  alert("Lütfen önce en az bir adet tarla oluşturun.");
+                  return;
+                }
+                setModalOpen(true);
+              }}
+              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-md transition hover:bg-emerald-500 active:scale-95"
+            >
+              <Plus className="h-4 w-4" /> İlk Ürünü Ekle
+            </button>
+          }
         />
       ) : (
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
