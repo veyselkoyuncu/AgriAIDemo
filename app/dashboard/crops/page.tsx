@@ -11,12 +11,14 @@ import EmptyState from "@/components/ui/EmptyState";
 import DeleteButton from "@/components/ui/DeleteButton";
 import DataCard from "@/components/ui/DataCard";
 import CropForm from "@/components/crops/CropForm";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 
 export default function CropsPage() {
   const [crops, setCrops] = useState<CropRow[]>([]);
   const [farms, setFarms] = useState<FarmRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<CropRow | null>(null);
 
   const supabase = createClient();
 
@@ -55,14 +57,6 @@ export default function CropsPage() {
   }, [supabase]);
 
   const handleDeleteCrop = async (id: string) => {
-    if (
-      !confirm(
-        "Bu ürünü silmek istediğinize emin misiniz? Bağlı tüm faaliyetler de silinecektir."
-      )
-    ) {
-      return;
-    }
-
     try {
       const { error } = await supabase.from("crops").delete().eq("id", id);
       if (error) throw error;
@@ -142,12 +136,26 @@ export default function CropsPage() {
                   : []),
               ]}
               actions={
-                <DeleteButton onDelete={() => handleDeleteCrop(crop.id)} />
+                <DeleteButton onDelete={() => setConfirmDelete(crop)} />
               }
             />
           ))}
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Ürünü Sil"
+        message={`"${confirmDelete?.name}" ürününü silmek istediğinize emin misiniz? Bağlı tüm faaliyetler de silinecektir.`}
+        onConfirm={() => {
+          if (confirmDelete) {
+            handleDeleteCrop(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
 
       <ModalDialog
         open={modalOpen}

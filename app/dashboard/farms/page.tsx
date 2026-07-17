@@ -11,11 +11,13 @@ import EmptyState from "@/components/ui/EmptyState";
 import DeleteButton from "@/components/ui/DeleteButton";
 import DataCard from "@/components/ui/DataCard";
 import FarmForm from "@/components/farms/FarmForm";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 
 export default function FarmsPage() {
   const [farms, setFarms] = useState<FarmRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<FarmRow | null>(null);
 
   const supabase = createClient();
 
@@ -44,10 +46,6 @@ export default function FarmsPage() {
   }, [supabase]);
 
   const handleDeleteFarm = async (id: string) => {
-    if (!confirm("Bu tarlayı silmek istediğinize emin misiniz? Bağlı tüm ürünler ve faaliyetler de silinecektir.")) {
-      return;
-    }
-
     try {
       const { error } = await supabase.from("farms").delete().eq("id", id);
       if (error) throw error;
@@ -138,12 +136,26 @@ export default function FarmsPage() {
                 },
               ]}
               actions={
-                <DeleteButton onDelete={() => handleDeleteFarm(farm.id)} />
+                <DeleteButton onDelete={() => setConfirmDelete(farm)} />
               }
             />
           ))}
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Tarlayı Sil"
+        message={`"${confirmDelete?.name}" tarlasını silmek istediğinize emin misiniz? Bağlı tüm ürünler ve faaliyetler de silinecektir.`}
+        onConfirm={() => {
+          if (confirmDelete) {
+            handleDeleteFarm(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
 
       {/* Add Farm Modal */}
       <ModalDialog
