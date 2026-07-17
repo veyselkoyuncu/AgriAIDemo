@@ -27,9 +27,7 @@ export default function DashboardStatsGrid() {
         const [farmsRes, messagesRes] = await Promise.all([
           supabase
             .from("farms")
-            .select(
-              `id, crops (id, activities (id))`
-            )
+            .select(`id, crops (id, activities (id))`)
             .eq("user_id", user.id),
           supabase
             .from("profiles")
@@ -81,7 +79,7 @@ export default function DashboardStatsGrid() {
     fetchStats();
   }, [supabase]);
 
-  if (loading) return <LoadingSpinner />;
+  if (loading) return <LoadingSpinner inline label="İstatistikler yükleniyor..." />;
 
   const statCards = [
     { name: "Tarlalarım", value: stats.farms, icon: Trees, href: "/dashboard/farms" },

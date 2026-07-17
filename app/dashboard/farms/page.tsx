@@ -97,7 +97,15 @@ export default function FarmsPage() {
         <EmptyState
           icon={Trees}
           title="Tarla Bulunamadı"
-          description="Kayıtlı tarlanız bulunmamaktadır. Sağ üstteki butondan ilk tarlanızı ekleyebilirsiniz."
+          description="Henüz kayıtlı bir tarlanız bulunmuyor. İlk tarlanızı ekleyerek tarımsal faaliyetlerinizi kaydetmeye başlayın."
+          action={
+            <button
+              onClick={() => setModalOpen(true)}
+              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-md transition hover:bg-emerald-500 active:scale-95"
+            >
+              <Plus className="h-4 w-4" /> İlk Tarlanı Oluştur
+            </button>
+          }
         />
       ) : (
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -107,16 +115,26 @@ export default function FarmsPage() {
               icon={Trees}
               iconColor="emerald"
               title={farm.name}
+              subtitle={farm.location ? `${farm.location}` : undefined}
+              badge={
+                farm.area
+                  ? { text: `${farm.area} dönüm`, color: "emerald" }
+                  : null
+              }
               info={[
                 {
                   icon: MapPin,
                   label: "",
                   value: farm.location || "Lokasyon belirtilmemiş",
+                  highlight: !!farm.location,
                 },
                 {
                   icon: Scale,
                   label: "",
-                  value: farm.area ? `${farm.area} Dönüm` : "Dönüm belirtilmemiş",
+                  value: farm.area
+                    ? `${farm.area} Dönüm`
+                    : "Dönüm belirtilmemiş",
+                  highlight: !!farm.area,
                 },
               ]}
               actions={
