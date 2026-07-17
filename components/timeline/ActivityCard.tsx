@@ -1,16 +1,17 @@
-// ActivityCard — premium single timeline entry
+// ActivityCard — premium single timeline entry with edit/delete actions
 'use client';
 
-import { Calendar, Trash2, MapPin, Sprout, Package } from "lucide-react";
+import { Calendar, Trash2, Pencil, MapPin, Sprout, Package } from "lucide-react";
 import { getActivityLabel, getActivityConfig } from "@/lib/constants/activity-types";
 import ActivityIcon from "./ActivityIcon";
 
 interface ActivityCardProps {
   activity: any;
   onDelete: (id: string) => void;
+  onEdit: (activity: any) => void;
 }
 
-export default function ActivityCard({ activity, onDelete }: ActivityCardProps) {
+export default function ActivityCard({ activity, onDelete, onEdit }: ActivityCardProps) {
   const actType = activity.data?.activity_type || "unknown";
   const config = getActivityConfig(actType);
 
@@ -45,6 +46,13 @@ export default function ActivityCard({ activity, onDelete }: ActivityCardProps) 
                   ).toLocaleDateString("tr-TR")
                 : new Date(activity.created_at).toLocaleDateString("tr-TR")}
             </span>
+            <button
+              onClick={() => onEdit(activity)}
+              className="rounded-lg p-1.5 text-zinc-400 opacity-0 transition-all hover:bg-blue-50 hover:text-blue-600 group-hover:opacity-100 dark:hover:bg-blue-950/20 dark:hover:text-blue-400"
+              title="Düzenle"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
             <button
               onClick={() => onDelete(activity.id)}
               className="rounded-lg p-1.5 text-zinc-400 opacity-0 transition-all hover:bg-red-50 hover:text-red-600 group-hover:opacity-100 dark:hover:bg-red-950/20 dark:hover:text-red-400"
